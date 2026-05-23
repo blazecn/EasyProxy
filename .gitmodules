@@ -1,0 +1,4 @@
+[submodule "src-tauri/vendor/mihomo"]
+	path = src-tauri/vendor/mihomo
+	url = https://github.com/MetaCubeX/mihomo.git
+	branch = Meta
