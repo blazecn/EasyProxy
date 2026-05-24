@@ -11,6 +11,7 @@ use config_service::{
 };
 use core_manager::{CoreManager, CoreStatus};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -22,6 +23,9 @@ struct AppState {
     mode: Mutex<ProxyMode>,
     tun_enabled: Mutex<bool>,
     dns_override: Mutex<Option<config_service::DnsOverride>>,
+    subscriptions: Mutex<Vec<SavedSubscription>>,
+    selected_nodes: Mutex<HashMap<String, String>>,
+    custom_rules: Mutex<Vec<String>>,
     data_dir: PathBuf,
     core: CoreManager,
     proxy: SystemProxy,
@@ -40,6 +44,18 @@ struct ImportedSubscription {
     nodes: Vec<String>,
     format: String,
     content: String,
+    rules: Vec<String>,
+    groups: Vec<config_service::ProxyGroupSummary>,
+    node_types: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SavedSubscription {
+    name: String,
+    url: String,
+    content: String,
+    nodes: Vec<String>,
+    format: String,
     rules: Vec<String>,
     groups: Vec<config_service::ProxyGroupSummary>,
     node_types: std::collections::BTreeMap<String, String>,
@@ -476,6 +492,87 @@ async fn set_tun_mode(
     core_status_inner(&state)
 }
 
+#[tauri::command]
+fn load_subscriptions(state: State<'_, AppState>) -> Result<Vec<SavedSubscription>, String> {
+    Ok(state
+        .subscriptions
+        .lock()
+        .map_err(|_| "读取订阅列表失败".to_string())?
+        .clone())
+}
+
+#[tauri::command]
+fn save_subscriptions(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    subscriptions: Vec<SavedSubscription>,
+) -> Result<(), String> {
+    let data_dir = app_data_dir(&app)?;
+    let yaml = serde_yaml::to_string(&subscriptions)
+        .map_err(|e| format!("序列化订阅列表失败: {e}"))?;
+    std::fs::write(data_dir.join("subscriptions.yaml"), yaml)
+        .map_err(|e| format!("保存订阅列表失败: {e}"))?;
+    *state
+        .subscriptions
+        .lock()
+        .map_err(|_| "更新订阅列表状态失败".to_string())? = subscriptions;
+    Ok(())
+}
+
+#[tauri::command]
+fn load_selected_nodes(state: State<'_, AppState>) -> Result<HashMap<String, String>, String> {
+    Ok(state
+        .selected_nodes
+        .lock()
+        .map_err(|_| "读取节点选择失败".to_string())?
+        .clone())
+}
+
+#[tauri::command]
+fn save_selected_nodes(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    nodes: HashMap<String, String>,
+) -> Result<(), String> {
+    let data_dir = app_data_dir(&app)?;
+    let yaml = serde_yaml::to_string(&nodes)
+        .map_err(|e| format!("序列化节点选择失败: {e}"))?;
+    std::fs::write(data_dir.join("selected_nodes.yaml"), yaml)
+        .map_err(|e| format!("保存节点选择失败: {e}"))?;
+    *state
+        .selected_nodes
+        .lock()
+        .map_err(|_| "更新节点选择状态失败".to_string())? = nodes;
+    Ok(())
+}
+
+#[tauri::command]
+fn load_custom_rules(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    Ok(state
+        .custom_rules
+        .lock()
+        .map_err(|_| "读取自定义规则失败".to_string())?
+        .clone())
+}
+
+#[tauri::command]
+fn save_custom_rules(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    rules: Vec<String>,
+) -> Result<(), String> {
+    let data_dir = app_data_dir(&app)?;
+    let yaml = serde_yaml::to_string(&rules)
+        .map_err(|e| format!("序列化自定义规则失败: {e}"))?;
+    std::fs::write(data_dir.join("custom_rules.yaml"), yaml)
+        .map_err(|e| format!("保存自定义规则失败: {e}"))?;
+    *state
+        .custom_rules
+        .lock()
+        .map_err(|_| "更新自定义规则状态失败".to_string())? = rules;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -486,11 +583,29 @@ pub fn run() {
             let dns_override = std::fs::read_to_string(data_dir.join("dns_override.yaml"))
                 .ok()
                 .and_then(|s| serde_yaml::from_str(&s).ok());
+            let subscriptions: Vec<SavedSubscription> =
+                std::fs::read_to_string(data_dir.join("subscriptions.yaml"))
+                    .ok()
+                    .and_then(|s| serde_yaml::from_str(&s).ok())
+                    .unwrap_or_default();
+            let selected_nodes: HashMap<String, String> =
+                std::fs::read_to_string(data_dir.join("selected_nodes.yaml"))
+                    .ok()
+                    .and_then(|s| serde_yaml::from_str(&s).ok())
+                    .unwrap_or_default();
+            let custom_rules: Vec<String> =
+                std::fs::read_to_string(data_dir.join("custom_rules.yaml"))
+                    .ok()
+                    .and_then(|s| serde_yaml::from_str(&s).ok())
+                    .unwrap_or_default();
             app.manage(AppState {
                 subscription: Mutex::new(subscription),
                 mode: Mutex::new(ProxyMode::Rule),
                 tun_enabled: Mutex::new(false),
                 dns_override: Mutex::new(dns_override),
+                subscriptions: Mutex::new(subscriptions),
+                selected_nodes: Mutex::new(selected_nodes),
+                custom_rules: Mutex::new(custom_rules),
                 data_dir,
                 core,
                 proxy: SystemProxy::new("127.0.0.1", 7890),
@@ -522,6 +637,12 @@ pub fn run() {
             test_delays,
             get_dns_override,
             set_dns_override,
+            load_subscriptions,
+            save_subscriptions,
+            load_selected_nodes,
+            save_selected_nodes,
+            load_custom_rules,
+            save_custom_rules,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

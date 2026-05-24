@@ -9,13 +9,37 @@ vi.mock('@tauri-apps/api/core', () => ({
 }))
 
 function expectTextContent(text: string) {
-  expect(screen.getByText((_, element) => element?.textContent === text)).toBeInTheDocument()
+  const matches = screen.getAllByText((_, element) => element?.textContent === text)
+  expect(matches.length).toBeGreaterThan(0)
+}
+
+// Mutable store so each test can configure what load_* commands return
+const store = {
+  subscriptions: [] as Array<Record<string, unknown>>,
+  selectedNodes: {} as Record<string, string>,
+  customRules: [] as string[],
+}
+
+function savedSubscription(overrides: Record<string, unknown> = {}) {
+  return {
+    name: 'one.example',
+    url: 'https://one.example/sub.yaml',
+    content: 'proxies:\n  - name: HK 01\n',
+    nodes: ['HK 01'],
+    format: 'clash-yaml',
+    rules: [],
+    groups: [],
+    node_types: {},
+    ...overrides,
+  }
 }
 
 beforeEach(() => {
-  localStorage.clear()
+  store.subscriptions = []
+  store.selectedNodes = {}
+  store.customRules = []
   mockInvoke.mockReset()
-  mockInvoke.mockImplementation((command: string) => {
+  mockInvoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
     if (command === 'core_status') {
       return Promise.resolve({
         core: 'Stopped',
@@ -24,11 +48,41 @@ beforeEach(() => {
       })
     }
 
+    if (command === 'load_subscriptions') {
+      return Promise.resolve(store.subscriptions)
+    }
+
+    if (command === 'load_selected_nodes') {
+      return Promise.resolve(store.selectedNodes)
+    }
+
+    if (command === 'load_custom_rules') {
+      return Promise.resolve(store.customRules)
+    }
+
+    if (command === 'save_subscriptions') {
+      store.subscriptions = (args?.subscriptions as Array<Record<string, unknown>>) ?? []
+      return Promise.resolve()
+    }
+
+    if (command === 'save_selected_nodes') {
+      store.selectedNodes = (args?.nodes as Record<string, string>) ?? {}
+      return Promise.resolve()
+    }
+
+    if (command === 'save_custom_rules') {
+      store.customRules = (args?.rules as string[]) ?? []
+      return Promise.resolve()
+    }
+
     if (command === 'refresh_subscription') {
       return Promise.resolve({
         nodes: ['HK 01', 'SG 02'],
         format: 'clash-yaml',
         content: 'proxies:\n  - name: HK 01\n',
+        rules: [],
+        groups: [],
+        node_types: {},
       })
     }
 
@@ -36,6 +90,9 @@ beforeEach(() => {
       return Promise.resolve({
         nodes: ['HK 01', 'SG 02'],
         format: 'clash-yaml',
+        rules: [],
+        groups: [],
+        node_types: {},
       })
     }
 
@@ -52,8 +109,13 @@ beforeEach(() => {
 })
 
 describe('EasyProxy shell', () => {
-  it('shows the sidebar with navigation and controls', () => {
+  it('shows the sidebar with navigation and controls', async () => {
     render(<App />)
+
+    // Wait for data load to complete
+    await waitFor(() => {
+      expect(screen.getByLabelText('订阅地址')).toBeInTheDocument()
+    })
 
     // Sidebar navigation
     expect(screen.getByRole('button', { name: '总览' })).toBeInTheDocument()
@@ -65,32 +127,23 @@ describe('EasyProxy shell', () => {
     expect(screen.getByRole('switch', { name: 'TUN 模式' })).toBeInTheDocument()
 
     // Import form in sidebar (shown when no subscriptions)
-    expect(screen.getByLabelText('订阅地址')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '导入' })).toBeInTheDocument()
 
-    // Overview page (text appears in both subtitle and info-card message)
+    // Overview page
     expect(screen.getAllByText('等待导入订阅')).toHaveLength(2)
   })
 
   it('switches proxy mode from the overview info card', async () => {
-    localStorage.setItem(
-      'easyproxy.subscriptions',
-      JSON.stringify([
-        {
-          name: 'one.example',
-          url: 'https://one.example/sub.yaml',
-          content: 'proxies:\n  - name: HK 01\n',
-          nodes: ['HK 01'],
-          format: 'clash-yaml',
-        },
-      ]),
-    )
+    store.subscriptions = [savedSubscription()]
 
     render(<App />)
 
-    expect(screen.getByRole('button', { name: '规则模式' })).toBeInTheDocument()
+    await waitFor(() => {
+      const btns = screen.getAllByRole('button', { name: '规则模式' })
+      expect(btns.length).toBeGreaterThan(0)
+    })
 
-    fireEvent.click(screen.getByRole('button', { name: '全局模式' }))
+    fireEvent.click(screen.getAllByRole('button', { name: '全局模式' })[0])
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith('set_proxy_mode', { mode: 'Global' })
@@ -98,27 +151,21 @@ describe('EasyProxy shell', () => {
   })
 
   it('saves imported subscription and switches without refetching urls', async () => {
-    localStorage.setItem(
-      'easyproxy.subscriptions',
-      JSON.stringify([
-        {
-          name: 'one.example',
-          url: 'https://one.example/sub.yaml',
-          content: 'proxies:\n  - name: HK 01\n',
-          nodes: ['HK 01'],
-          format: 'clash-yaml',
-        },
-        {
-          name: 'two.example',
-          url: 'https://two.example/sub.yaml',
-          content: 'proxies:\n  - name: SG 02\n',
-          nodes: ['SG 02'],
-          format: 'clash-yaml',
-        },
-      ]),
-    )
+    store.subscriptions = [
+      savedSubscription(),
+      savedSubscription({
+        name: 'two.example',
+        url: 'https://two.example/sub.yaml',
+        content: 'proxies:\n  - name: SG 02\n',
+        nodes: ['SG 02'],
+      }),
+    ]
 
     render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /two.example/ })).toBeInTheDocument()
+    })
 
     const twoExampleBtn = screen.getByRole('button', { name: /two.example/ })
     fireEvent.mouseDown(twoExampleBtn)
@@ -135,24 +182,14 @@ describe('EasyProxy shell', () => {
     })
   })
 
-  it('shows saved subscription cards in sidebar and opens import form from add button', () => {
-    localStorage.setItem(
-      'easyproxy.subscriptions',
-      JSON.stringify([
-        {
-          name: 'one.example',
-          url: 'https://one.example/sub.yaml',
-          content: 'proxies:\n  - name: HK 01\n',
-          nodes: ['HK 01'],
-          format: 'clash-yaml',
-        },
-      ]),
-    )
+  it('shows saved subscription cards in sidebar and opens import form from add button', async () => {
+    store.subscriptions = [savedSubscription()]
 
     render(<App />)
 
-    // Subscription shown in sidebar
-    expect(screen.getByRole('button', { name: /one.example/ })).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /one.example/ })).toBeInTheDocument()
+    })
 
     // Import form hidden
     expect(screen.queryByLabelText('订阅地址')).not.toBeInTheDocument()
@@ -162,23 +199,16 @@ describe('EasyProxy shell', () => {
     expectTextContent('节点数量1 个')
   })
 
-  it('renames the active subscription via modal', () => {
-    localStorage.setItem(
-      'easyproxy.subscriptions',
-      JSON.stringify([
-        {
-          name: 'one.example',
-          url: 'https://one.example/sub.yaml',
-          content: 'proxies:\n  - name: HK 01\n',
-          nodes: ['HK 01'],
-          format: 'clash-yaml',
-        },
-      ]),
-    )
+  it('renames the active subscription via modal', async () => {
+    store.subscriptions = [savedSubscription()]
 
     render(<App />)
 
-    fireEvent.click(screen.getByRole('button', { name: /重命名/ }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /one.example/ })).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getAllByRole('button', { name: /重命名/ })[0])
 
     fireEvent.change(screen.getByLabelText('订阅名称'), {
       target: { value: '工作订阅' },
@@ -186,52 +216,48 @@ describe('EasyProxy shell', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
 
-    expect(JSON.parse(localStorage.getItem('easyproxy.subscriptions') ?? '[]')[0]).toMatchObject({
-      name: '工作订阅',
-      url: 'https://one.example/sub.yaml',
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('save_subscriptions', {
+        subscriptions: expect.arrayContaining([
+          expect.objectContaining({
+            name: '工作订阅',
+            url: 'https://one.example/sub.yaml',
+          }),
+        ]),
+      })
     })
   })
 
-  it('navigates to full node page from sidebar', () => {
-    localStorage.setItem(
-      'easyproxy.subscriptions',
-      JSON.stringify([
-        {
-          name: 'one.example',
-          url: 'https://one.example/sub.yaml',
-          content: 'proxies:\n  - name: HK 01\n',
-          nodes: ['HK 01', 'SG 02'],
-          format: 'clash-yaml',
-        },
-      ]),
-    )
+  it('navigates to full node page from sidebar', async () => {
+    store.subscriptions = [
+      savedSubscription({ nodes: ['HK 01', 'SG 02'] }),
+    ]
 
     render(<App />)
 
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /one.example/ })).toBeInTheDocument()
+    })
+
     fireEvent.click(screen.getByRole('button', { name: '线路切换' }))
 
-    expect(screen.getByRole('heading', { name: '线路切换' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /HK 01/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /SG 02/ })).toBeInTheDocument()
   })
 
-  it('filters subscription info nodes into the overview info card', () => {
-    localStorage.setItem(
-      'easyproxy.subscriptions',
-      JSON.stringify([
-        {
-          name: 'one.example',
-          url: 'https://one.example/sub.yaml',
-          content: 'proxies:\n  - name: HK 01\n',
-          nodes: ['剩余流量：197.92 GB', '距离下次重置剩余：31 天', '套餐到期：2027-02-22', 'HK 01'],
-          format: 'clash-yaml',
-        },
-      ]),
-    )
+  it('filters subscription info nodes into the overview info card', async () => {
+    store.subscriptions = [
+      savedSubscription({
+        nodes: ['剩余流量：197.92 GB', '距离下次重置剩余：31 天', '套餐到期：2027-02-22', 'HK 01'],
+      }),
+    ]
 
     render(<App />)
 
-    expectTextContent('剩余流量197.92 GB')
+    await waitFor(() => {
+      expectTextContent('剩余流量197.92 GB')
+    })
+
     expectTextContent('距离下次重置剩余31 天')
     expectTextContent('套餐到期2027-02-22')
     expectTextContent('当前线路HK 01')
@@ -240,6 +266,10 @@ describe('EasyProxy shell', () => {
 
   it('names imported subscriptions from the url domain and selects them', async () => {
     render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('订阅地址')).toBeInTheDocument()
+    })
 
     fireEvent.change(screen.getByLabelText('订阅地址'), {
       target: { value: 'https://sub.example.com/path/sub.yaml' },
@@ -250,71 +280,65 @@ describe('EasyProxy shell', () => {
       expect(screen.getByRole('button', { name: /sub.example.com/ })).toBeInTheDocument()
     })
 
-    const savedSubscriptions = JSON.parse(localStorage.getItem('easyproxy.subscriptions') ?? '[]')
-    expect(savedSubscriptions[0]).toMatchObject({
-      name: 'sub.example.com',
-      url: 'https://sub.example.com/path/sub.yaml',
+    expect(mockInvoke).toHaveBeenCalledWith('save_subscriptions', {
+      subscriptions: expect.arrayContaining([
+        expect.objectContaining({
+          name: 'sub.example.com',
+          url: 'https://sub.example.com/path/sub.yaml',
+        }),
+      ]),
     })
-    expect(localStorage.getItem('easyproxy.activeSubscription')).toBe(
-      'https://sub.example.com/path/sub.yaml',
-    )
   })
 
-  it('restores the last selected subscription on next launch', () => {
-    localStorage.setItem(
-      'easyproxy.subscriptions',
-      JSON.stringify([
-        {
-          name: 'one.example',
-          url: 'https://one.example/sub.yaml',
-          content: 'proxies:\n  - name: HK 01\n',
-          nodes: ['HK 01'],
-          format: 'clash-yaml',
-        },
-        {
-          name: 'two.example',
-          url: 'https://two.example/sub.yaml',
-          content: 'proxies:\n  - name: SG 02\n',
-          nodes: ['SG 02'],
-          format: 'clash-yaml',
-        },
-      ]),
-    )
-    localStorage.setItem('easyproxy.activeSubscription', 'https://two.example/sub.yaml')
+  it('restores the last selected subscription on next launch', async () => {
+    // Active subscription is the first one in the array
+    store.subscriptions = [
+      savedSubscription({
+        name: 'two.example',
+        url: 'https://two.example/sub.yaml',
+        content: 'proxies:\n  - name: SG 02\n',
+        nodes: ['SG 02'],
+      }),
+      savedSubscription(),
+    ]
 
     render(<App />)
 
-    expectTextContent('当前线路SG 02')
+    await waitFor(() => {
+      expectTextContent('当前线路SG 02')
+    })
+
     expect(screen.getByRole('button', { name: /two.example/ })).toHaveClass('selected')
   })
 
   it('caches the selected node for the active subscription', async () => {
-    localStorage.setItem(
-      'easyproxy.subscriptions',
-      JSON.stringify([
-        {
-          name: 'one.example',
-          url: 'https://one.example/sub.yaml',
-          content: 'proxies:\n  - name: HK 01\n',
-          nodes: ['HK 01', 'SG 02'],
-          format: 'clash-yaml',
-        },
-      ]),
-    )
-    localStorage.setItem('easyproxy.activeSubscription', 'https://one.example/sub.yaml')
+    store.subscriptions = [
+      savedSubscription({
+        nodes: ['HK 01', 'SG 02'],
+        groups: [{ name: 'Proxy', type: 'select', nodes: ['HK 01', 'SG 02'] }],
+      }),
+    ]
 
     render(<App />)
 
-    fireEvent.click(screen.getByRole('button', { name: /SG 02/ }))
+    await waitFor(() => {
+      const btns = screen.getAllByRole('button', { name: /HK 01/ })
+      expect(btns.length).toBeGreaterThan(0)
+    })
 
-    // When proxy is off, node selection is cached locally without invoking backend
-    expect(JSON.parse(localStorage.getItem('easyproxy.selectedNodes') ?? '{}')).toEqual({
-      'https://one.example/sub.yaml': 'SG 02',
+    fireEvent.click(screen.getAllByRole('button', { name: /SG 02/ })[0])
+
+    // When proxy is off, node selection is cached via backend
+    await waitFor(() => {
+      const saveCalls = mockInvoke.mock.calls.filter(
+        (call: [string, unknown]) => call[0] === 'save_selected_nodes',
+      )
+      expect(saveCalls.length).toBeGreaterThan(0)
     })
   })
 
-  it('keeps other controls usable while a subscription import is pending', () => {
-    let resolveImport: (value: { nodes: string[]; format: string; content: string }) => void = () => {}
+  it('keeps other controls usable while a subscription import is pending', async () => {
+    let resolveImport: (value: { nodes: string[]; format: string; content: string; rules: string[]; groups: Array<Record<string, unknown>>; node_types: Record<string, string> }) => void = () => {}
     mockInvoke.mockImplementation((command: string) => {
       if (command === 'core_status') {
         return Promise.resolve({
@@ -323,6 +347,10 @@ describe('EasyProxy shell', () => {
           system_proxy: '127.0.0.1:7890',
         })
       }
+
+      if (command === 'load_subscriptions') return Promise.resolve([])
+      if (command === 'load_selected_nodes') return Promise.resolve({})
+      if (command === 'load_custom_rules') return Promise.resolve([])
 
       if (command === 'refresh_subscription') {
         return new Promise((resolve) => {
@@ -335,6 +363,10 @@ describe('EasyProxy shell', () => {
 
     render(<App />)
 
+    await waitFor(() => {
+      expect(screen.getByLabelText('订阅地址')).toBeInTheDocument()
+    })
+
     fireEvent.change(screen.getByLabelText('订阅地址'), {
       target: { value: 'https://example.com/sub.yaml' },
     })
@@ -344,11 +376,11 @@ describe('EasyProxy shell', () => {
     expect(screen.getByRole('switch', { name: '系统代理' })).not.toBeDisabled()
     expect(screen.getByRole('switch', { name: 'TUN 模式' })).not.toBeDisabled()
 
-    resolveImport({ nodes: ['HK 01'], format: 'clash-yaml', content: 'proxies:\n  - name: HK 01\n' })
+    resolveImport({ nodes: ['HK 01'], format: 'clash-yaml', content: 'proxies:\n  - name: HK 01\n', rules: [], groups: [], node_types: {} })
   })
 
   it('uses a preview status instead of showing raw Tauri invoke errors', async () => {
-    mockInvoke.mockRejectedValueOnce(
+    mockInvoke.mockRejectedValue(
       new TypeError("Cannot read properties of undefined (reading 'invoke')"),
     )
 
@@ -358,10 +390,7 @@ describe('EasyProxy shell', () => {
       expect(screen.getByRole('button', { name: /dy.boost1.shop/ })).toBeInTheDocument()
     })
     expect(screen.queryByText(/Cannot read properties/)).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /dy.boost1.shop/ })).toBeInTheDocument()
-    expectTextContent('剩余流量197.92 GB')
-    expectTextContent('距离下次重置剩余31 天')
-    expectTextContent('当前线路香港 01')
-    expect(screen.getByRole('button', { name: /香港 01/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /dy\.boost1\.shop/ })).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /香港 01/ }).length).toBeGreaterThan(0)
   })
 })

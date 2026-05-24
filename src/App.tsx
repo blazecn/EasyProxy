@@ -43,24 +43,6 @@ interface SavedSubscription extends ImportedSubscription {
   url: string
 }
 
-const savedSubscriptionsKey = 'easyproxy.subscriptions'
-const activeSubscriptionKey = 'easyproxy.activeSubscription'
-const selectedNodesKey = 'easyproxy.selectedNodes'
-const customRulesKey = 'easyproxy.customRules'
-
-function readCustomRules(): string[] {
-  try {
-    const saved = JSON.parse(localStorage.getItem(customRulesKey) ?? '[]')
-    return Array.isArray(saved) ? saved.filter((r): r is string => typeof r === 'string') : []
-  } catch {
-    return []
-  }
-}
-
-export function saveCustomRules(rules: string[]) {
-  localStorage.setItem(customRulesKey, JSON.stringify(rules))
-}
-
 export function detectRuleType(input: string): string | null {
   const trimmed = input.trim()
   if (!trimmed) return null
@@ -160,57 +142,6 @@ function getSubscriptionName(url: string) {
   }
 }
 
-function readSavedSubscriptions() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(savedSubscriptionsKey) ?? '[]')
-    return Array.isArray(saved)
-      ? saved
-          .filter(
-            (item): item is SavedSubscription =>
-              typeof item?.url === 'string' &&
-              typeof item?.content === 'string' &&
-              typeof item?.format === 'string' &&
-              Array.isArray(item?.nodes),
-          )
-          .map((item) => ({
-            ...item,
-            rules: Array.isArray(item.rules) ? item.rules : [],
-            groups: Array.isArray(item.groups) ? item.groups : [],
-            name: typeof item.name === 'string' && item.name.trim() ? item.name : getSubscriptionName(item.url),
-          }))
-      : []
-  } catch {
-    return []
-  }
-}
-
-function saveSubscriptions(subscriptions: SavedSubscription[]) {
-  localStorage.setItem(savedSubscriptionsKey, JSON.stringify(subscriptions))
-}
-
-function saveActiveSubscription(url: string) {
-  localStorage.setItem(activeSubscriptionKey, url)
-}
-
-// Per-group selections: { [groupName]: nodeName }
-function readSelectedNodes(): Record<string, string> {
-  try {
-    const saved = JSON.parse(localStorage.getItem(selectedNodesKey) ?? '{}')
-    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return {}
-    const result: Record<string, string> = {}
-    for (const [key, value] of Object.entries(saved)) {
-      if (typeof value === 'string') {
-        result[key] = value
-      } else if (value && typeof value === 'object' && typeof (value as Record<string, unknown>).name === 'string') {
-        // Legacy format: { subscriptionUrl: nodeName } — skip, handled per-group now
-      }
-    }
-    return result
-  } catch {
-    return {}
-  }
-}
-
 function isSubscriptionInfoNode(node: string) {
   return /流量|重置|到期|官网/i.test(node)
 }
@@ -299,32 +230,6 @@ function computeDefaultSelections(groups: ProxyGroupSummary[]): Record<string, s
   return selections
 }
 
-function readInitialSubscriptionState() {
-  const savedSubscriptions = readSavedSubscriptions()
-  const savedActiveSubscription = localStorage.getItem(activeSubscriptionKey) ?? ''
-  const activeSubscription =
-    savedSubscriptions.find((item) => item.url === savedActiveSubscription)?.url ??
-    savedSubscriptions[0]?.url ??
-    ''
-  const activeSummary = savedSubscriptions.find((item) => item.url === activeSubscription)
-  const savedSelections = readSelectedNodes()
-
-  // Merge saved selections with defaults for missing groups
-  const groups = activeSummary?.groups ?? []
-  const defaults = computeDefaultSelections(groups)
-  const selectedNodes = { ...defaults, ...savedSelections }
-
-  return {
-    savedSubscriptions,
-    activeSubscription,
-    nodes: activeSummary?.nodes ?? [],
-    selectedNodes,
-    rules: activeSummary?.rules ?? [],
-    groups,
-    nodeTypes: activeSummary?.node_types ?? {},
-  }
-}
-
 function SidebarSubscriptionItem({
   subscription,
   isSelected,
@@ -352,34 +257,25 @@ function SidebarSubscriptionItem({
 }
 
 function App() {
-  const [initialSubscriptionState] = useState(readInitialSubscriptionState)
   const [enabled, setEnabled] = useState(false)
   const [tunEnabled, setTunEnabled] = useState(false)
   const [subscriptionUrl, setSubscriptionUrl] = useState('')
-  const [savedSubscriptions, setSavedSubscriptions] = useState(
-    initialSubscriptionState.savedSubscriptions,
-  )
-  const [activeSubscription, setActiveSubscription] = useState(
-    initialSubscriptionState.activeSubscription,
-  )
-  const [isAddingSubscription, setIsAddingSubscription] = useState(
-    initialSubscriptionState.savedSubscriptions.length === 0,
-  )
-  const [nodes, setNodes] = useState(initialSubscriptionState.nodes)
-  const [selectedNodes, setSelectedNodes] = useState<Record<string, string>>(
-    initialSubscriptionState.selectedNodes,
-  )
+  const [savedSubscriptions, setSavedSubscriptions] = useState<SavedSubscription[]>([])
+  const [activeSubscription, setActiveSubscription] = useState('')
+  const [isAddingSubscription, setIsAddingSubscription] = useState(true)
+  const [nodes, setNodes] = useState<string[]>([])
+  const [selectedNodes, setSelectedNodes] = useState<Record<string, string>>({})
   const [proxyMode, setProxyMode] = useState<BackendProxyMode>('Rule')
   const [editingSubscriptionName, setEditingSubscriptionName] = useState(false)
   const [subscriptionNameDraft, setSubscriptionNameDraft] = useState('')
   const [message, setMessage] = useState('等待导入订阅')
   const [busyAction, setBusyAction] = useState<string | null>(null)
-  const [rules, setRules] = useState(initialSubscriptionState.rules)
-  const [groups, setGroups] = useState<ProxyGroupSummary[]>(initialSubscriptionState.groups)
-  const [nodeTypes, setNodeTypes] = useState<Record<string, string>>(initialSubscriptionState.nodeTypes)
+  const [rules, setRules] = useState<string[]>([])
+  const [groups, setGroups] = useState<ProxyGroupSummary[]>([])
+  const [nodeTypes, setNodeTypes] = useState<Record<string, string>>({})
   const [delays, setDelays] = useState<Record<string, { delay: number | null; error?: string | null }>>({})
   const [testingGroup, setTestingGroup] = useState<string | null>(null)
-  const [customRules, setCustomRules] = useState<string[]>(readCustomRules)
+  const [customRules, setCustomRules] = useState<string[]>([])
   const [rulesTab, setRulesTab] = useState<'custom' | 'subscription'>('custom')
   const [rulesSearch, setRulesSearch] = useState('')
   const [showAddRuleModal, setShowAddRuleModal] = useState(false)
@@ -462,6 +358,70 @@ function App() {
     return selectedNodes[firstGroup.name] ?? firstGroup.nodes[0] ?? '未选择'
   }, [groups, selectedNodes, proxyNodes])
 
+  // Load persisted data from backend on mount
+  useEffect(() => {
+    let mounted = true
+
+    async function loadData() {
+      try {
+        const [subscriptions, savedNodes, savedRules] = await Promise.all([
+          invoke<SavedSubscription[]>('load_subscriptions'),
+          invoke<Record<string, string>>('load_selected_nodes'),
+          invoke<string[]>('load_custom_rules'),
+        ])
+
+        if (!mounted) return
+
+        const validated = subscriptions.filter(
+          (item): item is SavedSubscription =>
+            typeof item?.url === 'string' &&
+            typeof item?.content === 'string' &&
+            typeof item?.format === 'string' &&
+            Array.isArray(item?.nodes),
+        ).map((item) => ({
+          ...item,
+          rules: Array.isArray(item.rules) ? item.rules : [],
+          groups: Array.isArray(item.groups) ? item.groups : [],
+          name: typeof item.name === 'string' && item.name.trim() ? item.name : getSubscriptionName(item.url),
+        }))
+
+        setSavedSubscriptions(validated)
+        const activeUrl = validated[0]?.url ?? ''
+        setActiveSubscription(activeUrl)
+
+        const active = validated.find((s) => s.url === activeUrl)
+        const activeGroups = active?.groups ?? []
+        const defaults = computeDefaultSelections(activeGroups)
+        setSelectedNodes({ ...defaults, ...savedNodes })
+        setNodes(active?.nodes ?? [])
+        setRules(active?.rules ?? [])
+        setGroups(activeGroups)
+        setNodeTypes(active?.node_types ?? {})
+        setCustomRules(Array.isArray(savedRules) ? savedRules.filter((r): r is string => typeof r === 'string') : [])
+        setIsAddingSubscription(validated.length === 0)
+      } catch (error) {
+        if (!mounted) return
+        if (isTauriRuntimeMissing(error)) {
+          const defaults = computeDefaultSelections(browserPreviewSubscription.groups)
+          setSavedSubscriptions([browserPreviewSubscription])
+          setActiveSubscription(browserPreviewSubscription.url)
+          setIsAddingSubscription(false)
+          setNodes(browserPreviewSubscription.nodes)
+          setNodeTypes(browserPreviewSubscription.node_types ?? {})
+          setSelectedNodes(defaults)
+          setRules(browserPreviewRules)
+          setGroups(browserPreviewSubscription.groups)
+        }
+      }
+    }
+
+    loadData()
+
+    return () => {
+      mounted = false
+    }
+  }, [])
+
   useEffect(() => {
     let mounted = true
 
@@ -475,23 +435,12 @@ function App() {
       .catch((error) => {
         if (!mounted) return
         setMessage(displayError(error))
-        if (isTauriRuntimeMissing(error) && initialSubscriptionState.savedSubscriptions.length === 0) {
-          const defaults = computeDefaultSelections(browserPreviewSubscription.groups)
-          setSavedSubscriptions([browserPreviewSubscription])
-          setActiveSubscription(browserPreviewSubscription.url)
-          setIsAddingSubscription(false)
-          setNodes(browserPreviewSubscription.nodes)
-          setNodeTypes(browserPreviewSubscription.node_types ?? {})
-          setSelectedNodes(defaults)
-          setRules(browserPreviewRules)
-          setGroups(browserPreviewSubscription.groups)
-        }
       })
 
     return () => {
       mounted = false
     }
-  }, [initialSubscriptionState.savedSubscriptions.length])
+  }, [])
 
   async function toggleProxy() {
     const nextEnabled = !enabled
@@ -522,8 +471,7 @@ function App() {
         url: nextUrl,
       })
       const defaults = computeDefaultSelections(summary.groups)
-      const savedSelections = readSelectedNodes()
-      const nextSelections = { ...defaults, ...savedSelections }
+      const nextSelections = { ...defaults, ...selectedNodes }
 
       const nextSubscription = {
         name: getSubscriptionName(nextUrl),
@@ -541,13 +489,12 @@ function App() {
       setRules(summary.rules)
       setGroups(summary.groups)
       setActiveSubscription(nextUrl)
-      saveActiveSubscription(nextUrl)
       setSavedSubscriptions((current) => {
         const nextSubscriptions = [
           nextSubscription,
           ...current.filter((item) => item.url !== nextUrl),
         ]
-        saveSubscriptions(nextSubscriptions)
+        invoke('save_subscriptions', { subscriptions: nextSubscriptions })
         return nextSubscriptions
       })
       setIsAddingSubscription(false)
@@ -570,8 +517,7 @@ function App() {
         content: saved.content,
       })
       const defaults = computeDefaultSelections(summary.groups)
-      const savedSelections = readSelectedNodes()
-      const nextSelections = { ...defaults, ...savedSelections }
+      const nextSelections = { ...defaults, ...selectedNodes }
 
       setNodes(summary.nodes)
       setNodeTypes(summary.node_types)
@@ -584,11 +530,10 @@ function App() {
             ? { ...item, nodes: summary.nodes, format: summary.format, rules: summary.rules, groups: summary.groups, node_types: summary.node_types }
             : item,
         )
-        saveSubscriptions(nextSubscriptions)
+        invoke('save_subscriptions', { subscriptions: nextSubscriptions })
         return nextSubscriptions
       })
       setActiveSubscription(saved.url)
-      saveActiveSubscription(saved.url)
       setMessage(`已切换订阅，共 ${summary.nodes.length} 个节点`)
     } catch (error) {
       setMessage(displayError(error))
@@ -622,7 +567,7 @@ function App() {
     if (!enabled) {
       setSelectedNodes((prev) => {
         const next = { ...prev, [group]: node }
-        localStorage.setItem(selectedNodesKey, JSON.stringify(next))
+        invoke('save_selected_nodes', { nodes: next })
         return next
       })
       setMessage(`${group} → ${node}`)
@@ -632,7 +577,7 @@ function App() {
     const previousNode = selectedNodes[group]
     setSelectedNodes((prev) => {
       const next = { ...prev, [group]: node }
-      localStorage.setItem(selectedNodesKey, JSON.stringify(next))
+      invoke('save_selected_nodes', { nodes: next })
       return next
     })
     setBusyAction('node')
@@ -673,15 +618,13 @@ function App() {
   function deleteSubscription(url: string) {
     setSavedSubscriptions((current) => {
       const nextSubscriptions = current.filter((item) => item.url !== url)
-      saveSubscriptions(nextSubscriptions)
+      invoke('save_subscriptions', { subscriptions: nextSubscriptions })
       if (url === activeSubscription) {
         const nextActive = nextSubscriptions[0]
         if (nextActive) {
           setActiveSubscription(nextActive.url)
-          saveActiveSubscription(nextActive.url)
         } else {
           setActiveSubscription('')
-          localStorage.removeItem(activeSubscriptionKey)
           setNodes([])
           setNodeTypes({})
           setSelectedNodes({})
@@ -715,7 +658,7 @@ function App() {
           ? { ...subscription, name: nextName }
           : subscription,
       )
-      saveSubscriptions(nextSubscriptions)
+      invoke('save_subscriptions', { subscriptions: nextSubscriptions })
       return nextSubscriptions
     })
     setEditingSubscriptionName(false)
@@ -890,7 +833,7 @@ function App() {
 
     const data: DnsOverrideData = { enabled: dnsOverride.enabled, config }
     try {
-      const status = await invoke<AppStatus>('set_dns_override', data)
+      const status = await invoke<AppStatus>('set_dns_override', data as unknown as Record<string, unknown>)
       setDnsOverride(data)
       setDnsForm(config)
       setDnsYaml(formToYaml(config))
@@ -1457,7 +1400,7 @@ function App() {
                         onClick={() => {
                           setCustomRules(prev => {
                             const next = prev.filter(r => r !== rule)
-                            saveCustomRules(next)
+                            invoke('save_custom_rules', { rules: next })
                             return next
                           })
                         }}
@@ -1987,7 +1930,7 @@ function App() {
                   const rule = `${newRuleType},${newRuleInput.trim()},${newRuleTarget}`
                   const next = [...customRules, rule]
                   setCustomRules(next)
-                  saveCustomRules(next)
+                  invoke('save_custom_rules', { rules: next })
                   setShowAddRuleModal(false)
                 }}
               >
