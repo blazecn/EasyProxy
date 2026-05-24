@@ -28,6 +28,13 @@ struct AppStatus {
     system_proxy: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ImportedSubscription {
+    nodes: Vec<String>,
+    format: String,
+    content: String,
+}
+
 #[tauri::command]
 fn core_status(state: State<'_, AppState>) -> Result<AppStatus, String> {
     let mode = *state
@@ -68,16 +75,23 @@ fn save_subscription(
 }
 
 #[tauri::command]
-fn refresh_subscription(
+async fn refresh_subscription(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     url: String,
-) -> Result<SubscriptionSummary, String> {
-    let content = reqwest::blocking::get(url)
+) -> Result<ImportedSubscription, String> {
+    let content = reqwest::get(url)
+        .await
         .map_err(|error| format!("请求订阅失败: {error}"))?
         .text()
+        .await
         .map_err(|error| format!("读取订阅内容失败: {error}"))?;
-    save_subscription(app, state, content)
+    let summary = save_subscription(app, state, content.clone())?;
+    Ok(ImportedSubscription {
+        nodes: summary.nodes,
+        format: summary.format,
+        content,
+    })
 }
 
 #[tauri::command]
