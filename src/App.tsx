@@ -17,6 +17,7 @@ interface AppStatus {
   core: CoreStatus
   mode: BackendProxyMode
   system_proxy: string
+  tun_enabled: boolean
 }
 
 interface ProxyGroupSummary {
@@ -377,6 +378,7 @@ function App() {
         if (!mounted) return
         setEnabled(status.core === 'Running')
         setProxyMode(status.mode)
+        setTunEnabled(status.tun_enabled)
       })
       .catch((error) => {
         if (!mounted) return
@@ -633,10 +635,24 @@ function App() {
     setMessage('订阅名称已更新')
   }
 
-  function toggleTunMode() {
+  async function toggleTunMode() {
     const nextEnabled = !tunEnabled
     setTunEnabled(nextEnabled)
-    setMessage(nextEnabled ? 'TUN 模式已开启' : 'TUN 模式已关闭')
+    setMessage(nextEnabled ? '正在安装并开启 TUN 模式...' : '正在关闭 TUN 模式...')
+    setBusyAction('tun')
+
+    try {
+      const status = await invoke<AppStatus>('set_tun_mode', { enabled: nextEnabled })
+      setTunEnabled(status.tun_enabled)
+      setEnabled(status.core === 'Running')
+      setProxyMode(status.mode)
+      setMessage(nextEnabled ? 'TUN 模式已开启' : 'TUN 模式已关闭')
+    } catch (error) {
+      setTunEnabled(!nextEnabled)
+      setMessage(displayError(error))
+    } finally {
+      setBusyAction(null)
+    }
   }
 
   return (
@@ -749,6 +765,7 @@ function App() {
             aria-checked={tunEnabled}
             aria-label="TUN 模式"
             onClick={toggleTunMode}
+            disabled={busyAction === 'tun' || busyAction === 'proxy'}
           >
             <span>TUN 模式</span>
             <span className="toggle-track" aria-hidden="true" />
