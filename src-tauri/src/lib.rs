@@ -4,7 +4,8 @@ pub mod mihomo_api;
 pub mod system_proxy;
 
 use config_service::{
-    save_subscription as save_subscription_file, write_runtime_config, SubscriptionSummary,
+    merge_subscription, save_subscription as save_subscription_file, write_runtime_config,
+    SubscriptionSummary,
 };
 use core_manager::{CoreManager, CoreStatus};
 use serde::{Deserialize, Serialize};
@@ -33,6 +34,9 @@ struct ImportedSubscription {
     nodes: Vec<String>,
     format: String,
     content: String,
+    rules: Vec<String>,
+    groups: Vec<config_service::ProxyGroupSummary>,
+    node_types: std::collections::BTreeMap<String, String>,
 }
 
 #[tauri::command]
@@ -80,17 +84,38 @@ async fn refresh_subscription(
     state: State<'_, AppState>,
     url: String,
 ) -> Result<ImportedSubscription, String> {
-    let content = reqwest::get(url)
+    let client = reqwest::Client::new();
+    let yaml_text = client
+        .get(&url)
+        .header("User-Agent", "clash-verge/2.0")
+        .send()
         .await
-        .map_err(|error| format!("请求订阅失败: {error}"))?
+        .map_err(|e| format!("请求订阅失败: {e}"))?
         .text()
         .await
-        .map_err(|error| format!("读取订阅内容失败: {error}"))?;
-    let summary = save_subscription(app, state, content.clone())?;
+        .map_err(|e| format!("读取订阅内容失败: {e}"))?;
+
+    let merged = match client
+        .get(&url)
+        .header("User-Agent", "mihomo")
+        .send()
+        .await
+    {
+        Ok(resp) => match resp.text().await {
+            Ok(uri_text) => merge_subscription(&yaml_text, &uri_text).unwrap_or(yaml_text),
+            Err(_) => yaml_text,
+        },
+        Err(_) => yaml_text,
+    };
+
+    let summary = save_subscription(app, state, merged.clone())?;
     Ok(ImportedSubscription {
         nodes: summary.nodes,
         format: summary.format,
-        content,
+        content: merged,
+        rules: summary.rules,
+        groups: summary.groups,
+        node_types: summary.node_types,
     })
 }
 
@@ -136,8 +161,15 @@ fn stop_core(state: State<'_, AppState>) -> Result<AppStatus, String> {
 }
 
 #[tauri::command]
-fn select_proxy_node(node: String) -> Result<(), String> {
-    mihomo_api::select_proxy_node(&node)
+fn select_proxy_node(group: String, node: String) -> Result<(), String> {
+    mihomo_api::select_proxy_node(&group, &node)
+}
+
+#[tauri::command]
+async fn test_delays(nodes: Vec<String>) -> Result<std::collections::BTreeMap<String, mihomo_api::DelayResult>, String> {
+    tauri::async_runtime::spawn_blocking(move || mihomo_api::test_proxy_delays(&nodes))
+        .await
+        .map_err(|e| format!("测速失败: {e}"))
 }
 
 fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -193,7 +225,8 @@ pub fn run() {
             select_proxy_node,
             set_proxy_mode,
             start_core,
-            stop_core
+            stop_core,
+            test_delays
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

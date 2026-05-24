@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { useSwipeable } from 'react-swipeable'
-import { Pencil, Trash2, Layout, Share2, List } from 'lucide-react'
+import { Pencil, Trash2, Layout, Share2, List, ChevronDown } from 'lucide-react'
 import './App.css'
 
 type CoreStatus = 'Stopped' | 'Running'
@@ -20,9 +19,18 @@ interface AppStatus {
   system_proxy: string
 }
 
+interface ProxyGroupSummary {
+  name: string
+  type: string
+  nodes: string[]
+}
+
 interface SubscriptionSummary {
   nodes: string[]
   format: string
+  rules: string[]
+  groups: ProxyGroupSummary[]
+  node_types: Record<string, string>
 }
 
 interface ImportedSubscription extends SubscriptionSummary {
@@ -38,6 +46,7 @@ const savedSubscriptionsKey = 'easyproxy.subscriptions'
 const activeSubscriptionKey = 'easyproxy.activeSubscription'
 const selectedNodesKey = 'easyproxy.selectedNodes'
 const browserPreviewMessage = '浏览器预览模式'
+
 function buildBrowserPreviewContent() {
   const regions: Array<[string, number]> = [
     ['香港', 5],
@@ -78,11 +87,24 @@ const browserPreviewRules: string[] = [
   'MATCH,Proxy',
 ]
 
+const browserPreviewGroups: ProxyGroupSummary[] = [
+  { name: '香港 - 5 条', type: 'url-test', nodes: browserPreviewContent.nodes.filter(n => n.startsWith('香港')) },
+  { name: '新加坡 - 5 条', type: 'url-test', nodes: browserPreviewContent.nodes.filter(n => n.startsWith('新加坡')) },
+  { name: '日本 - 5 条', type: 'url-test', nodes: browserPreviewContent.nodes.filter(n => n.startsWith('日本')) },
+  { name: '美国 - 5 条', type: 'url-test', nodes: browserPreviewContent.nodes.filter(n => n.startsWith('美国')) },
+  { name: '韩国 - 3 条', type: 'url-test', nodes: browserPreviewContent.nodes.filter(n => n.startsWith('韩国')) },
+  { name: '台湾 - 3 条', type: 'url-test', nodes: browserPreviewContent.nodes.filter(n => n.startsWith('台湾')) },
+  { name: '德国 - 2 条', type: 'url-test', nodes: browserPreviewContent.nodes.filter(n => n.startsWith('德国')) },
+  { name: '英国 - 2 条', type: 'url-test', nodes: browserPreviewContent.nodes.filter(n => n.startsWith('英国')) },
+]
+
 const browserPreviewSubscription: SavedSubscription = {
   name: 'dy.boost1.shop',
   url: 'https://dy.boost1.shop/sub.yaml',
   content: browserPreviewContent.content,
   format: 'clash-yaml',
+  rules: browserPreviewRules,
+  groups: browserPreviewGroups,
   nodes: [
     '剩余流量：197.92 GB',
     '距离下次重置剩余：31 天',
@@ -90,6 +112,7 @@ const browserPreviewSubscription: SavedSubscription = {
     '永久官网:666.boostqz.com',
     ...browserPreviewContent.nodes,
   ],
+  node_types: {},
 }
 
 function isTauriRuntimeMissing(error: unknown) {
@@ -113,16 +136,20 @@ function readSavedSubscriptions() {
   try {
     const saved = JSON.parse(localStorage.getItem(savedSubscriptionsKey) ?? '[]')
     return Array.isArray(saved)
-      ? saved.filter(
-          (item): item is SavedSubscription =>
-            typeof item?.url === 'string' &&
-            typeof item?.content === 'string' &&
-            typeof item?.format === 'string' &&
-            Array.isArray(item?.nodes),
-        ).map((item) => ({
-          ...item,
-          name: typeof item.name === 'string' && item.name.trim() ? item.name : getSubscriptionName(item.url),
-        }))
+      ? saved
+          .filter(
+            (item): item is SavedSubscription =>
+              typeof item?.url === 'string' &&
+              typeof item?.content === 'string' &&
+              typeof item?.format === 'string' &&
+              Array.isArray(item?.nodes),
+          )
+          .map((item) => ({
+            ...item,
+            rules: Array.isArray(item.rules) ? item.rules : [],
+            groups: Array.isArray(item.groups) ? item.groups : [],
+            name: typeof item.name === 'string' && item.name.trim() ? item.name : getSubscriptionName(item.url),
+          }))
       : []
   } catch {
     return []
@@ -137,38 +164,90 @@ function saveActiveSubscription(url: string) {
   localStorage.setItem(activeSubscriptionKey, url)
 }
 
-function readSelectedNodes() {
+// Per-group selections: { [groupName]: nodeName }
+function readSelectedNodes(): Record<string, string> {
   try {
     const saved = JSON.parse(localStorage.getItem(selectedNodesKey) ?? '{}')
-    return saved && typeof saved === 'object' && !Array.isArray(saved)
-      ? Object.fromEntries(
-          Object.entries(saved).filter(
-            (entry): entry is [string, string] =>
-              typeof entry[0] === 'string' && typeof entry[1] === 'string',
-          ),
-        )
-      : {}
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return {}
+    const result: Record<string, string> = {}
+    for (const [key, value] of Object.entries(saved)) {
+      if (typeof value === 'string') {
+        result[key] = value
+      } else if (value && typeof value === 'object' && typeof (value as Record<string, unknown>).name === 'string') {
+        // Legacy format: { subscriptionUrl: nodeName } — skip, handled per-group now
+      }
+    }
+    return result
   } catch {
     return {}
   }
 }
 
-function saveSelectedNode(subscriptionUrl: string, node: string) {
-  localStorage.setItem(
-    selectedNodesKey,
-    JSON.stringify({
-      ...readSelectedNodes(),
-      [subscriptionUrl]: node,
-    }),
-  )
-}
-
 function isSubscriptionInfoNode(node: string) {
-  return /剩余流量|重置剩余|套餐到期|到期|官网|流量/i.test(node)
+  return /流量|重置|到期|官网/i.test(node)
 }
 
 function getProxyNodes(nodes: string[]) {
   return nodes.filter((node) => !isSubscriptionInfoNode(node))
+}
+
+const specialIcons: Record<string, string> = {
+  '自动选择': '⚡',   // ⚡
+  '故障转移': '\u{1F504}', // 🔄
+  'DIRECT': '\u{1F3E0}',  // 🏠
+  'REJECT': '\u{1F6AB}',  // 🚫
+}
+
+const countryFlags: Record<string, string> = {
+  '香港': '\u{1F1ED}\u{1F1F0}',   // 🇭🇰
+  '日本': '\u{1F1EF}\u{1F1F5}',   // 🇯🇵
+  '新加坡': '\u{1F1F8}\u{1F1EC}', // 🇸🇬
+  '美国': '\u{1F1FA}\u{1F1F8}',   // 🇺🇸
+  '韩国': '\u{1F1F0}\u{1F1F7}',   // 🇰🇷
+  '台湾': '\u{1F1E8}\u{1F1F3}',   // 🇨🇳
+  '德国': '\u{1F1E9}\u{1F1EA}',   // 🇩🇪
+  '英国': '\u{1F1EC}\u{1F1E7}',   // 🇬🇧
+  '马来西亚': '\u{1F1F2}\u{1F1FE}', // 🇲🇾
+  '土耳其': '\u{1F1F9}\u{1F1F7}',  // 🇹🇷
+  '阿根廷': '\u{1F1E6}\u{1F1F7}',  // 🇦🇷
+  '澳大利亚': '\u{1F1E6}\u{1F1FA}', // 🇦🇺
+  '澳洲': '\u{1F1E6}\u{1F1FA}',     // 🇦🇺
+  '印度': '\u{1F1EE}\u{1F1F3}',     // 🇮🇳
+  '加拿大': '\u{1F1E8}\u{1F1E6}',   // 🇨🇦
+  '法国': '\u{1F1EB}\u{1F1F7}',     // 🇫🇷
+  '泰国': '\u{1F1F9}\u{1F1ED}',     // 🇹🇭
+  '越南': '\u{1F1FB}\u{1F1F3}',     // 🇻🇳
+  '菲律宾': '\u{1F1F5}\u{1F1ED}',   // 🇵🇭
+  '俄罗斯': '\u{1F1F7}\u{1F1FA}',   // 🇷🇺
+  '巴西': '\u{1F1E7}\u{1F1F7}',     // 🇧🇷
+  '南非': '\u{1F1FF}\u{1F1E6}',     // 🇿🇦
+  '荷兰': '\u{1F1F3}\u{1F1F1}',     // 🇳🇱
+  '瑞典': '\u{1F1F8}\u{1F1EA}',     // 🇸🇪
+  '瑞士': '\u{1F1E8}\u{1F1ED}',     // 🇨🇭
+  '阿联酋': '\u{1F1E6}\u{1F1EA}',   // 🇦🇪
+  '意大利': '\u{1F1EE}\u{1F1F9}',   // 🇮🇹
+  '西班牙': '\u{1F1EA}\u{1F1F8}',   // 🇪🇸
+  '墨西哥': '\u{1F1F2}\u{1F1FD}',   // 🇲🇽
+  '印尼': '\u{1F1EE}\u{1F1E9}',     // 🇮🇩
+}
+
+const flagPairRe = /^(?:[\u{1F1E6}-\u{1F1FF}]{2})+/u
+
+function stripLeadingFlags(name: string): string {
+  return name.replace(flagPairRe, '').trim()
+}
+
+function nodeIcon(name: string): string {
+  // Match on stripped name (without any subscription-built-in flag)
+  const stripped = stripLeadingFlags(name)
+
+  for (const [key, icon] of Object.entries(specialIcons)) {
+    if (stripped === key) return icon
+  }
+  for (const [country, flag] of Object.entries(countryFlags)) {
+    if (stripped.includes(country)) return flag
+  }
+  return ''
 }
 
 function splitInfoLine(line: string) {
@@ -176,23 +255,20 @@ function splitInfoLine(line: string) {
   if (separatorIndex === -1) {
     return { label: line, value: '' }
   }
-
   return {
     label: line.slice(0, separatorIndex),
     value: line.slice(separatorIndex + 1).trim(),
   }
 }
 
-function applySubscriptionSummary(summary: SubscriptionSummary, preferredNode?: string) {
-  const proxyNodes = getProxyNodes(summary.nodes)
-
-  return {
-    nodes: summary.nodes,
-    selectedNode:
-      preferredNode && proxyNodes.includes(preferredNode)
-        ? preferredNode
-        : proxyNodes[0] ?? '无可用节点',
+function computeDefaultSelections(groups: ProxyGroupSummary[]): Record<string, string> {
+  const selections: Record<string, string> = {}
+  for (const group of groups) {
+    if (group.nodes.length > 0) {
+      selections[group.name] = group.nodes[0]
+    }
   }
+  return selections
 }
 
 function readInitialSubscriptionState() {
@@ -203,78 +279,47 @@ function readInitialSubscriptionState() {
     savedSubscriptions[0]?.url ??
     ''
   const activeSummary = savedSubscriptions.find((item) => item.url === activeSubscription)
-  const selectedNodes = readSelectedNodes()
-  const appliedSummary = activeSummary
-    ? applySubscriptionSummary(activeSummary, selectedNodes[activeSubscription])
-    : null
+  const savedSelections = readSelectedNodes()
+
+  // Merge saved selections with defaults for missing groups
+  const groups = activeSummary?.groups ?? []
+  const defaults = computeDefaultSelections(groups)
+  const selectedNodes = { ...defaults, ...savedSelections }
 
   return {
     savedSubscriptions,
     activeSubscription,
-    nodes: appliedSummary?.nodes ?? [],
-    selectedNode: appliedSummary?.selectedNode ?? '未选择',
+    nodes: activeSummary?.nodes ?? [],
+    selectedNodes,
+    rules: activeSummary?.rules ?? [],
+    groups,
+    nodeTypes: activeSummary?.node_types ?? {},
   }
-}
-
-interface SidebarSubscriptionItemProps {
-  subscription: SavedSubscription
-  isSwiped: boolean
-  isSelected: boolean
-  onSwipeOpen: () => void
-  onSwipeClose: () => void
-  onSwitch: () => void
-  onDelete: () => void
-  disabled: boolean
-  nodeCount: number
 }
 
 function SidebarSubscriptionItem({
   subscription,
-  isSwiped,
   isSelected,
-  onSwipeOpen,
-  onSwipeClose,
   onSwitch,
-  onDelete,
   disabled,
   nodeCount,
-}: SidebarSubscriptionItemProps) {
-  const swipeHandlers = useSwipeable({
-    onSwipedLeft: () => onSwipeOpen(),
-    onSwipedRight: () => onSwipeClose(),
-    onTap: () => {
-      if (isSwiped) {
-        onSwipeClose()
-      } else {
-        onSwitch()
-      }
-    },
-    delta: 60,
-    preventScrollOnSwipe: true,
-    trackMouse: true,
-  })
-
+}: {
+  subscription: SavedSubscription
+  isSelected: boolean
+  onSwitch: () => void
+  disabled: boolean
+  nodeCount: number
+}) {
   return (
-    <div className="sidebar-subscription-swipe" {...swipeHandlers}>
-      <button
-        className={`subscription-item ${isSwiped ? 'swiped' : ''} ${isSelected ? 'selected' : ''}`}
-        type="button"
-        disabled={disabled}
-      >
-        <span>{subscription.name}</span>
-        <small>{nodeCount} 个</small>
-      </button>
-      <button
-        className="sidebar-delete-action"
-        type="button"
-        onClick={(event) => {
-          event.stopPropagation()
-          onDelete()
-        }}
-      >
-        <Trash2 size={14} />
-      </button>
-    </div>
+    <button
+      className={`subscription-item ${isSelected ? 'selected' : ''}`}
+      type="button"
+      disabled={disabled}
+      onClick={onSwitch}
+    >
+      <span>{subscription.name}</span>
+      <small>{nodeCount} 个</small>
+    </button>
   )
 }
 
@@ -293,15 +338,21 @@ function App() {
     initialSubscriptionState.savedSubscriptions.length === 0,
   )
   const [nodes, setNodes] = useState(initialSubscriptionState.nodes)
-  const [selectedNode, setSelectedNode] = useState(initialSubscriptionState.selectedNode)
+  const [selectedNodes, setSelectedNodes] = useState<Record<string, string>>(
+    initialSubscriptionState.selectedNodes,
+  )
   const [proxyMode, setProxyMode] = useState<BackendProxyMode>('Rule')
   const [editingSubscriptionName, setEditingSubscriptionName] = useState(false)
   const [subscriptionNameDraft, setSubscriptionNameDraft] = useState('')
   const [message, setMessage] = useState('等待导入订阅')
   const [busyAction, setBusyAction] = useState<string | null>(null)
-  const [rules, setRules] = useState<string[]>([])
-  const [swipedUrl, setSwipedUrl] = useState<string | null>(null)
+  const [rules, setRules] = useState(initialSubscriptionState.rules)
+  const [groups, setGroups] = useState<ProxyGroupSummary[]>(initialSubscriptionState.groups)
+  const [nodeTypes, setNodeTypes] = useState<Record<string, string>>(initialSubscriptionState.nodeTypes)
+  const [delays, setDelays] = useState<Record<string, { delay: number | null; error?: string | null }>>({})
+  const [testingGroup, setTestingGroup] = useState<string | null>(null)
   const [page, setPage] = useState<Page>('overview')
+  const [overviewTab, setOverviewTab] = useState<'info' | 'nodes'>('info')
 
   const statusText = enabled ? '已连接' : '未连接'
   const currentSubscription = savedSubscriptions.find((item) => item.url === activeSubscription)
@@ -310,6 +361,13 @@ function App() {
     () => nodes.filter((node) => isSubscriptionInfoNode(node)),
     [nodes],
   )
+
+  // Get a representative "current node" for the sidebar status — first select group's choice
+  const statusNode = useMemo(() => {
+    if (groups.length === 0) return proxyNodes[0] ?? '未选择'
+    const firstGroup = groups[0]
+    return selectedNodes[firstGroup.name] ?? firstGroup.nodes[0] ?? '未选择'
+  }, [groups, selectedNodes, proxyNodes])
 
   useEffect(() => {
     let mounted = true
@@ -324,13 +382,15 @@ function App() {
         if (!mounted) return
         setMessage(displayError(error))
         if (isTauriRuntimeMissing(error) && initialSubscriptionState.savedSubscriptions.length === 0) {
-          const nextSummary = applySubscriptionSummary(browserPreviewSubscription)
+          const defaults = computeDefaultSelections(browserPreviewSubscription.groups)
           setSavedSubscriptions([browserPreviewSubscription])
           setActiveSubscription(browserPreviewSubscription.url)
           setIsAddingSubscription(false)
-          setNodes(nextSummary.nodes)
-          setSelectedNode(nextSummary.selectedNode)
+          setNodes(browserPreviewSubscription.nodes)
+          setNodeTypes(browserPreviewSubscription.node_types ?? {})
+          setSelectedNodes(defaults)
           setRules(browserPreviewRules)
+          setGroups(browserPreviewSubscription.groups)
         }
       })
 
@@ -372,16 +432,25 @@ function App() {
       const summary = await invoke<ImportedSubscription>('refresh_subscription', {
         url: nextUrl,
       })
-      const nextSummary = applySubscriptionSummary(summary, readSelectedNodes()[nextUrl])
+      const defaults = computeDefaultSelections(summary.groups)
+      const savedSelections = readSelectedNodes()
+      const nextSelections = { ...defaults, ...savedSelections }
+
       const nextSubscription = {
         name: getSubscriptionName(nextUrl),
         url: nextUrl,
         content: summary.content,
         nodes: summary.nodes,
         format: summary.format,
+        rules: summary.rules,
+        groups: summary.groups,
+        node_types: summary.node_types,
       }
-      setNodes(nextSummary.nodes)
-      setSelectedNode(nextSummary.selectedNode)
+      setNodes(summary.nodes)
+      setNodeTypes(summary.node_types)
+      setSelectedNodes(nextSelections)
+      setRules(summary.rules)
+      setGroups(summary.groups)
       setActiveSubscription(nextUrl)
       saveActiveSubscription(nextUrl)
       setSavedSubscriptions((current) => {
@@ -411,9 +480,24 @@ function App() {
       const summary = await invoke<SubscriptionSummary>('save_subscription', {
         content: saved.content,
       })
-      const nextSummary = applySubscriptionSummary(summary, readSelectedNodes()[saved.url])
-      setNodes(nextSummary.nodes)
-      setSelectedNode(nextSummary.selectedNode)
+      const defaults = computeDefaultSelections(summary.groups)
+      const savedSelections = readSelectedNodes()
+      const nextSelections = { ...defaults, ...savedSelections }
+
+      setNodes(summary.nodes)
+      setNodeTypes(summary.node_types)
+      setSelectedNodes(nextSelections)
+      setRules(summary.rules)
+      setGroups(summary.groups)
+      setSavedSubscriptions((current) => {
+        const nextSubscriptions = current.map((item) =>
+          item.url === saved.url
+            ? { ...item, nodes: summary.nodes, format: summary.format, rules: summary.rules, groups: summary.groups, node_types: summary.node_types }
+            : item,
+        )
+        saveSubscriptions(nextSubscriptions)
+        return nextSubscriptions
+      })
       setActiveSubscription(saved.url)
       saveActiveSubscription(saved.url)
       setMessage(`已切换订阅，共 ${summary.nodes.length} 个节点`)
@@ -424,28 +508,52 @@ function App() {
     }
   }
 
-  async function switchNode(node: string) {
-    if (!enabled) {
-      setSelectedNode(node)
-      if (activeSubscription) {
-        saveSelectedNode(activeSubscription, node)
+  async function testGroupSpeeds(groupName: string, groupNodes: string[]) {
+    setTestingGroup(groupName)
+    setMessage(`正在测速 ${groupName} (${groupNodes.length} 个节点)...`)
+    try {
+      const result = await invoke<Record<string, { delay: number | null; error?: string | null }>>('test_delays', { nodes: groupNodes })
+      setDelays((prev) => ({ ...prev, ...result }))
+      const successCount = Object.values(result).filter((d) => d.delay !== null).length
+      const errors = Object.entries(result).filter(([, d]) => d.error)
+      if (errors.length > 0) {
+        const sample = errors.slice(0, 3).map(([name, d]) => `${name}: ${d.error}`).join('; ')
+        setMessage(`${groupName} 测速完成 (${successCount}/${Object.keys(result).length}) 错误示例: ${sample}`)
+      } else {
+        setMessage(`${groupName} 测速完成 (${successCount}/${Object.keys(result).length})`)
       }
-      setMessage(`已选择 ${node}`)
+    } catch (error) {
+      setMessage(displayError(error))
+    } finally {
+      setTestingGroup(null)
+    }
+  }
+
+  async function switchNode(group: string, node: string) {
+    if (!enabled) {
+      setSelectedNodes((prev) => {
+        const next = { ...prev, [group]: node }
+        localStorage.setItem(selectedNodesKey, JSON.stringify(next))
+        return next
+      })
+      setMessage(`${group} → ${node}`)
       return
     }
 
-    const previousNode = selectedNode
-    setSelectedNode(node)
+    const previousNode = selectedNodes[group]
+    setSelectedNodes((prev) => {
+      const next = { ...prev, [group]: node }
+      localStorage.setItem(selectedNodesKey, JSON.stringify(next))
+      return next
+    })
     setBusyAction('node')
+    setMessage(`正在切换 ${group}`)
 
     try {
-      await invoke('select_proxy_node', { node })
-      if (activeSubscription) {
-        saveSelectedNode(activeSubscription, node)
-      }
-      setMessage(`已切换到 ${node}`)
+      await invoke('select_proxy_node', { group, node })
+      setMessage(`${group} → ${node}`)
     } catch (error) {
-      setSelectedNode(previousNode)
+      setSelectedNodes((prev) => ({ ...prev, [group]: previousNode ?? node }))
       setMessage(displayError(error))
     } finally {
       setBusyAction(null)
@@ -453,16 +561,18 @@ function App() {
   }
 
   async function switchProxyMode(mode: BackendProxyMode) {
-    const previousMode = proxyMode
     setProxyMode(mode)
-    setMessage('正在切换代理模式')
+    setMessage(`已切换到 ${proxyModeOptions.find((item) => item.value === mode)?.label ?? mode}`)
+
+    if (!enabled) return
+
+    const previousMode = proxyMode
     setBusyAction('mode')
 
     try {
       const status = await invoke<AppStatus>('set_proxy_mode', { mode })
       setEnabled(status.core === 'Running')
       setProxyMode(status.mode)
-      setMessage(`已切换到 ${proxyModeOptions.find((item) => item.value === status.mode)?.label ?? mode}`)
     } catch (error) {
       setProxyMode(previousMode)
       setMessage(displayError(error))
@@ -472,7 +582,6 @@ function App() {
   }
 
   function deleteSubscription(url: string) {
-    setSwipedUrl(null)
     setSavedSubscriptions((current) => {
       const nextSubscriptions = current.filter((item) => item.url !== url)
       saveSubscriptions(nextSubscriptions)
@@ -485,7 +594,9 @@ function App() {
           setActiveSubscription('')
           localStorage.removeItem(activeSubscriptionKey)
           setNodes([])
-          setSelectedNode('未选择')
+          setNodeTypes({})
+          setSelectedNodes({})
+          setGroups([])
           setIsAddingSubscription(true)
         }
       }
@@ -583,15 +694,8 @@ function App() {
           <SidebarSubscriptionItem
             key={subscription.url}
             subscription={subscription}
-            isSwiped={swipedUrl === subscription.url}
             isSelected={activeSubscription === subscription.url}
-            onSwipeOpen={() => setSwipedUrl(subscription.url)}
-            onSwipeClose={() => setSwipedUrl(null)}
-            onSwitch={() => {
-              setSwipedUrl(null)
-              switchSavedSubscription(subscription.url)
-            }}
-            onDelete={() => deleteSubscription(subscription.url)}
+            onSwitch={() => switchSavedSubscription(subscription.url)}
             disabled={busyAction === 'subscription'}
             nodeCount={getProxyNodes(subscription.nodes).length}
           />
@@ -621,7 +725,7 @@ function App() {
             <span className="sidebar-status-text">{statusText}</span>
           </div>
           <div className="sidebar-status-detail">
-            {selectedNode} · {proxyModeOptions.find((m) => m.value === proxyMode)?.label ?? proxyMode}
+            {statusNode} · {proxyModeOptions.find((m) => m.value === proxyMode)?.label ?? proxyMode}
           </div>
         </div>
 
@@ -677,7 +781,28 @@ function App() {
 
             <div className="overview-grid">
               <article className="info-card">
-                <span className="card-label">订阅信息</span>
+                <div className="info-card-header">
+                  <span className="card-label">订阅信息</span>
+                  {currentSubscription && (
+                    <div className="info-card-header-actions">
+                      <button
+                        type="button"
+                        title="重命名"
+                        onClick={startEditingSubscriptionName}
+                      >
+                        <Pencil size={13} />
+                      </button>
+                      <button
+                        className="danger"
+                        type="button"
+                        title="删除"
+                        onClick={() => deleteSubscription(activeSubscription)}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  )}
+                </div>
                 {currentSubscription ? (
                   <>
                     <div className="info-grid">
@@ -692,7 +817,7 @@ function App() {
                       })}
                       <div className="info-cell">
                         <span className="info-cell-label">当前线路</span>
-                        <span className="info-cell-value accent">{selectedNode}</span>
+                        <span className="info-cell-value accent">{statusNode}</span>
                       </div>
                       <div className="info-cell">
                         <span className="info-cell-label">节点数量</span>
@@ -704,20 +829,6 @@ function App() {
                           {proxyModeOptions.find((m) => m.value === proxyMode)?.label ?? proxyMode}
                         </span>
                       </div>
-                    </div>
-                    <div className="info-card-actions">
-                      <button type="button" onClick={startEditingSubscriptionName}>
-                        <Pencil size={12} />
-                        {' '}重命名
-                      </button>
-                      <button
-                        className="danger"
-                        type="button"
-                        onClick={() => deleteSubscription(activeSubscription)}
-                      >
-                        <Trash2 size={12} />
-                        {' '}删除
-                      </button>
                     </div>
                     <div className="info-card-modes">
                       {proxyModeOptions.map((mode) => (
@@ -739,38 +850,151 @@ function App() {
               </article>
 
               <article className="node-preview-card">
-                <div className="node-preview-header">
-                  <span className="card-label">线路</span>
-                  {proxyNodes.length > 3 && (
-                    <button type="button" onClick={() => setPage('nodes')}>
-                      查看全部 →
-                    </button>
-                  )}
-                </div>
+                <span className="card-label">线路</span>
                 {proxyNodes.length > 0 ? (
                   <div className="node-preview-list">
-                    {proxyNodes.slice(0, 6).map((node, index) => (
-                      <button
-                        key={node}
-                        className={`node-preview-item ${node === selectedNode ? 'selected' : ''}`}
-                        type="button"
-                        onClick={() => switchNode(node)}
-                        disabled={busyAction === 'node'}
-                      >
-                        <span>{node}</span>
-                        <small>{index === 0 ? '推荐' : `${42 + index * 18} ms`}</small>
-                      </button>
-                    ))}
-                    {proxyNodes.length > 6 && (
-                      <div className="node-preview-more">
-                        + {proxyNodes.length - 6} 个更多
-                      </div>
-                    )}
+                    {proxyNodes.map((node, index) => {
+                      const icon = nodeIcon(node)
+                      return (
+                        <button
+                          key={node}
+                          className={`node-preview-item ${node === statusNode ? 'selected' : ''}`}
+                          type="button"
+                          onClick={() => {
+                            const targetGroup = groups.find(g => g.nodes.includes(node))
+                            if (targetGroup) switchNode(targetGroup.name, node)
+                          }}
+                          disabled={busyAction === 'node'}
+                        >
+                          <div className="node-left">
+                            <span className="node-name">{icon ? `${icon} ${stripLeadingFlags(node)}` : node}</span>
+                            {nodeTypes[node] && <span className="node-protocol">{nodeTypes[node]}</span>}
+                          </div>
+                          {delays[node] !== undefined ? (
+                            <small className="node-delay">{delays[node].delay !== null ? `${delays[node].delay} ms` : '超时'}</small>
+                          ) : (
+                            <small className="node-delay">{index === 0 ? '推荐' : `${42 + index * 18} ms`}</small>
+                          )}
+                        </button>
+                      )
+                    })}
                   </div>
                 ) : (
                   <p className="node-preview-more">暂无可用线路</p>
                 )}
               </article>
+            </div>
+
+            <div className="overview-carousel">
+              <div className="carousel-tabs">
+                <button
+                  className={`carousel-tab ${overviewTab === 'info' ? 'active' : ''}`}
+                  type="button"
+                  onClick={() => setOverviewTab('info')}
+                >
+                  订阅信息
+                </button>
+                <button
+                  className={`carousel-tab ${overviewTab === 'nodes' ? 'active' : ''}`}
+                  type="button"
+                  onClick={() => setOverviewTab('nodes')}
+                >
+                  线路
+                </button>
+              </div>
+              <div className="carousel-track">
+                <div className={`carousel-panel ${overviewTab === 'info' ? 'active' : ''}`}>
+                  {currentSubscription ? (
+                    <>
+                      <div className="info-card-header">
+                        <span className="card-label">订阅信息</span>
+                        <div className="info-card-header-actions">
+                          <button type="button" title="重命名" onClick={startEditingSubscriptionName}>
+                            <Pencil size={13} />
+                          </button>
+                          <button className="danger" type="button" title="删除" onClick={() => deleteSubscription(activeSubscription)}>
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="info-grid">
+                        {subscriptionInfoNodes.map((node) => {
+                          const info = splitInfoLine(node)
+                          return (
+                            <div key={node} className="info-cell">
+                              <span className="info-cell-label">{info.label}</span>
+                              <span className="info-cell-value">{info.value}</span>
+                            </div>
+                          )
+                        })}
+                        <div className="info-cell">
+                          <span className="info-cell-label">当前线路</span>
+                          <span className="info-cell-value accent">{statusNode}</span>
+                        </div>
+                        <div className="info-cell">
+                          <span className="info-cell-label">节点数量</span>
+                          <span className="info-cell-value">{proxyNodes.length} 个</span>
+                        </div>
+                        <div className="info-cell">
+                          <span className="info-cell-label">代理模式</span>
+                          <span className="info-cell-value">
+                            {proxyModeOptions.find((m) => m.value === proxyMode)?.label ?? proxyMode}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="info-card-modes">
+                        {proxyModeOptions.map((mode) => (
+                          <button
+                            key={mode.value}
+                            className={mode.value === proxyMode ? 'selected' : ''}
+                            type="button"
+                            onClick={() => switchProxyMode(mode.value)}
+                            disabled={busyAction === 'mode'}
+                          >
+                            {mode.label}
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <p className="node-preview-more">{message}</p>
+                  )}
+                </div>
+                <div className={`carousel-panel ${overviewTab === 'nodes' ? 'active' : ''}`}>
+                  <span className="card-label">线路</span>
+                  {proxyNodes.length > 0 ? (
+                    <div className="carousel-node-list">
+                      {proxyNodes.map((node, index) => {
+                        const icon = nodeIcon(node)
+                        return (
+                          <button
+                            key={node}
+                            className={`node-preview-item ${node === statusNode ? 'selected' : ''}`}
+                            type="button"
+                            onClick={() => {
+                              const targetGroup = groups.find(g => g.nodes.includes(node))
+                              if (targetGroup) switchNode(targetGroup.name, node)
+                            }}
+                            disabled={busyAction === 'node'}
+                          >
+                            <div className="node-left">
+                              <span className="node-name">{icon ? `${icon} ${stripLeadingFlags(node)}` : node}</span>
+                              {nodeTypes[node] && <span className="node-protocol">{nodeTypes[node]}</span>}
+                            </div>
+                            {delays[node] !== undefined ? (
+                          <small className="node-delay">{delays[node].delay !== null ? `${delays[node].delay} ms` : '超时'}</small>
+                        ) : (
+                          <small className="node-delay">{index === 0 ? '推荐' : `${42 + index * 18} ms`}</small>
+                        )}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  ) : (
+                    <p className="node-preview-more">暂无可用线路</p>
+                  )}
+                </div>
+              </div>
             </div>
 
             {editingSubscriptionName && currentSubscription && (
@@ -826,24 +1050,85 @@ function App() {
             <div>
               <h2>线路切换</h2>
               <p className="subtitle">
-                {proxyNodes.length} 个可用线路
+                {groups.length} 个分组 · {proxyNodes.length} 个可用线路
               </p>
             </div>
-            <div className="node-page-list">
-              {proxyNodes.map((node, index) => (
-                <button
-                  key={node}
-                  className={`node-preview-item ${node === selectedNode ? 'selected' : ''}`}
-                  type="button"
-                  onClick={() => switchNode(node)}
-                  disabled={busyAction === 'node'}
-                >
-                  <span>{node}</span>
-                  <small>{index === 0 ? '推荐' : `${42 + index * 18} ms`}</small>
-                </button>
-              ))}
+            <div className="group-page-list">
+              {groups.length > 0 ? (
+                groups.map((group) => (
+                  <details key={group.name} className="group-section" open>
+                    <summary className="group-summary">
+                      <span className="group-summary-name">{group.name}</span>
+                      <span className="group-summary-right">
+                        <span className="group-summary-meta">
+                          {selectedNodes[group.name] ?? group.nodes[0] ?? '-'}
+                        </span>
+                        <span className="group-summary-meta">{group.type} · {group.nodes.length} 条</span>
+                        <button
+                          className="group-speed-test-btn"
+                          type="button"
+                          disabled={testingGroup === group.name}
+                          onClick={(e) => { e.stopPropagation(); e.preventDefault(); testGroupSpeeds(group.name, group.nodes) }}
+                          title="测速"
+                        >
+                          {testingGroup === group.name ? '...' : '⚡'}
+                        </button>
+                        <ChevronDown size={14} className="group-chevron" />
+                      </span>
+                    </summary>
+                    <div className="group-node-list">
+                      {group.nodes.map((node) => {
+                        const icon = nodeIcon(node)
+                        const delay = delays[node]
+                        return (
+                          <button
+                            key={node}
+                            className={`node-preview-item ${node === (selectedNodes[group.name] ?? '') ? 'selected' : ''}`}
+                            type="button"
+                            onClick={() => switchNode(group.name, node)}
+                            disabled={busyAction === 'node'}
+                          >
+                            <div className="node-left">
+                              <span className="node-name">{icon ? `${icon} ${stripLeadingFlags(node)}` : node}</span>
+                              {nodeTypes[node] && <span className="node-protocol">{nodeTypes[node]}</span>}
+                            </div>
+                            {delay !== undefined && (
+                              <small className="node-delay">{delay.delay !== null ? `${delay.delay} ms` : '超时'}</small>
+                            )}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </details>
+                ))
+              ) : (
+                <div className="node-page-list">
+                  {proxyNodes.map((node, index) => {
+                    const icon = nodeIcon(node)
+                    return (
+                      <button
+                        key={node}
+                        className={`node-preview-item ${node === statusNode ? 'selected' : ''}`}
+                        type="button"
+                        onClick={() => switchNode(groups[0]?.name ?? '', node)}
+                        disabled={busyAction === 'node'}
+                      >
+                        <div className="node-left">
+                          <span className="node-name">{icon ? `${icon} ${stripLeadingFlags(node)}` : node}</span>
+                          {nodeTypes[node] && <span className="node-protocol">{nodeTypes[node]}</span>}
+                        </div>
+                        {delays[node] !== undefined ? (
+                          <small className="node-delay">{delays[node].delay !== null ? `${delays[node].delay} ms` : '超时'}</small>
+                        ) : (
+                          <small className="node-delay">{index === 0 ? '推荐' : `${42 + index * 18} ms`}</small>
+                        )}
+                      </button>
+                    )
+                  })}
             </div>
-          </>
+      )}
+      </div>
+      </>
         )}
 
         {page === 'rules' && (
