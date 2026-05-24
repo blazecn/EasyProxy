@@ -91,6 +91,15 @@ pub fn recv_message(stream: &mut UnixStream) -> Result<IpcMessage, String> {
 }
 
 pub fn connect() -> Result<UnixStream, String> {
-    UnixStream::connect(SOCKET_PATH)
-        .map_err(|e| format!("连接 easyproxy 服务失败 (TUN 服务未安装?): {e}"))
+    let mut last_err = String::new();
+    for _ in 0..5 {
+        match UnixStream::connect(SOCKET_PATH) {
+            Ok(stream) => return Ok(stream),
+            Err(e) => {
+                last_err = format!("连接 easyproxy 服务失败 (TUN 服务未安装?): {e}");
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
+    }
+    Err(last_err)
 }

@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::process::Command;
 
 const SERVICE_NAME: &str = "com.easyproxy.service";
@@ -11,18 +10,8 @@ pub fn is_installed() -> bool {
 }
 
 pub fn install(binary_path: &str) -> Result<(), String> {
-    let install_dir = PathBuf::from(INSTALL_DIR);
-    std::fs::create_dir_all(&install_dir)
-        .map_err(|e| format!("创建安装目录失败: {e}"))?;
-
-    let dest = install_dir.join(SERVICE_BIN_NAME);
-    std::fs::copy(binary_path, &dest)
-        .map_err(|e| format!("复制 service 二进制失败: {e}"))?;
-
-    Command::new("chmod")
-        .args(["755", dest.to_str().unwrap_or("")])
-        .status()
-        .map_err(|e| format!("设置权限失败: {e}"))?;
+    let install_dir = INSTALL_DIR;
+    let dest = &format!("{}/{}", install_dir, SERVICE_BIN_NAME);
 
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -44,18 +33,28 @@ pub fn install(binary_path: &str) -> Result<(), String> {
 </dict>
 </plist>"#,
         name = SERVICE_NAME,
-        bin = dest.display(),
+        bin = dest,
     );
 
+    let escaped_plist = plist
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+        .replace("$", "\\$")
+        .replace("`", "\\`");
+
     let script = format!(
-        r#"do shell script "cat > {plist} << 'PLIST_EOF'
+        r#"do shell script "mkdir -p {install_dir} && cp {src} {dest} && chmod 755 {dest}
+cat > {plist_path} << 'PLIST_EOF'
 {content}
 PLIST_EOF
-launchctl load {plist}
+launchctl load {plist_path}
 mkdir -p /var/log && touch /var/log/easyproxy-service.log
 " with administrator privileges"#,
-        plist = PLIST_PATH,
-        content = plist.replace("\\", "\\\\").replace("\"", "\\\""),
+        install_dir = install_dir,
+        src = shell_escape(binary_path),
+        dest = dest,
+        plist_path = PLIST_PATH,
+        content = escaped_plist,
     );
 
     let output = Command::new("osascript")
@@ -74,6 +73,10 @@ mkdir -p /var/log && touch /var/log/easyproxy-service.log
             Err(format!("安装服务失败: {}", stderr.trim()))
         }
     }
+}
+
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace("'", "'\\''"))
 }
 
 pub fn uninstall() -> Result<(), String> {
