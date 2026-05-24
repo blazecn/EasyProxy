@@ -39,7 +39,7 @@ fn parse_subscription_returns_node_names() {
 
 #[test]
 fn build_mihomo_config_sets_ports_mode_and_controller() {
-    let config = build_mihomo_config(SAMPLE_SUBSCRIPTION, "rule").expect("config should build");
+    let config = build_mihomo_config(SAMPLE_SUBSCRIPTION, "rule", false).expect("config should build");
 
     assert!(config.contains("mixed-port: 7890"));
     assert!(config.contains("external-controller: 127.0.0.1:9090"));
@@ -57,7 +57,7 @@ fn parse_subscription_accepts_base64_anytls_uri_lists() {
 
 #[test]
 fn build_mihomo_config_converts_anytls_uri_to_proxy_yaml() {
-    let config = build_mihomo_config(ANYTLS_URI_SUBSCRIPTION, "rule").expect("config should build");
+    let config = build_mihomo_config(ANYTLS_URI_SUBSCRIPTION, "rule", false).expect("config should build");
 
     assert!(config.contains("type: anytls"));
     assert!(config.contains("name: Edge 01"));
@@ -87,7 +87,7 @@ fn uri_subscription_preserves_provider_info_nodes() {
 
 #[test]
 fn generated_proxy_group_preserves_provider_info_nodes() {
-    let config = build_mihomo_config(ANYTLS_WITH_INFO_LINES, "rule").expect("config should build");
+    let config = build_mihomo_config(ANYTLS_WITH_INFO_LINES, "rule", false).expect("config should build");
 
     assert!(config.contains("剩余流量"));
     assert!(config.contains("套餐到期"));
