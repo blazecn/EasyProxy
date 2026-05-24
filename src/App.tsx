@@ -6,6 +6,7 @@ import './App.css'
 
 type CoreStatus = 'Stopped' | 'Running'
 type BackendProxyMode = 'Rule' | 'Global' | 'Direct'
+type Page = 'overview' | 'nodes' | 'rules'
 
 const proxyModeOptions: Array<{ value: BackendProxyMode; label: string }> = [
   { value: 'Rule', label: '规则模式' },
