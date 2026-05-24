@@ -1559,8 +1559,347 @@ function App() {
 
             {dnsTab === 'form' && (
               <div className="dns-form">
-                {/* Task 5 fills this in */}
-                <p className="node-preview-more">表单模式 — 待实现</p>
+                {/* --- 基础设置 --- */}
+                <fieldset className="dns-fieldset">
+                  <legend className="dns-legend">基础设置</legend>
+
+                  <label className="dns-field">
+                    <span>DNS 功能</span>
+                    <button
+                      className={dnsForm.enable ? 'dns-mini-toggle active' : 'dns-mini-toggle'}
+                      type="button"
+                      role="switch"
+                      aria-checked={dnsForm.enable ?? true}
+                      onClick={() => {
+                        setDnsForm(f => ({ ...f, enable: !f.enable }))
+                        setDnsDirty(true)
+                      }}
+                    >
+                      <span className="toggle-track" aria-hidden="true" />
+                    </button>
+                  </label>
+
+                  <label className="dns-field">
+                    <span>监听地址</span>
+                    <input
+                      className="dns-input"
+                      value={dnsForm.listen ?? ''}
+                      onChange={(e) => { setDnsForm(f => ({ ...f, listen: e.target.value })); setDnsDirty(true) }}
+                      placeholder="0.0.0.0:53"
+                    />
+                  </label>
+
+                  <label className="dns-field">
+                    <span>解析模式</span>
+                    <select
+                      className="dns-select"
+                      value={dnsForm['enhanced-mode'] ?? 'fake-ip'}
+                      onChange={(e) => { setDnsForm(f => ({ ...f, 'enhanced-mode': e.target.value })); setDnsDirty(true) }}
+                    >
+                      <option value="fake-ip">fake-ip</option>
+                      <option value="redir-host">redir-host</option>
+                    </select>
+                  </label>
+
+                  <label className="dns-field">
+                    <span>IPv6</span>
+                    <button
+                      className={dnsForm.ipv6 ? 'dns-mini-toggle active' : 'dns-mini-toggle'}
+                      type="button"
+                      role="switch"
+                      aria-checked={dnsForm.ipv6 ?? false}
+                      onClick={() => {
+                        setDnsForm(f => ({ ...f, ipv6: !f.ipv6 }))
+                        setDnsDirty(true)
+                      }}
+                    >
+                      <span className="toggle-track" aria-hidden="true" />
+                    </button>
+                  </label>
+                </fieldset>
+
+                {/* --- DNS 服务器 --- */}
+                <fieldset className="dns-fieldset">
+                  <legend className="dns-legend">DNS 服务器</legend>
+
+                  {(['default-nameserver', 'nameserver', 'fallback'] as const).map((key) => (
+                    <div key={key} className="dns-field dns-list-field">
+                      <span className="dns-list-label">
+                        {key === 'default-nameserver' ? '引导 DNS' : key === 'nameserver' ? '主 DNS' : '回退 DNS'}
+                      </span>
+                      <div className="dns-list-items">
+                        {(dnsForm[key] ?? []).map((item, idx) => (
+                          <div key={idx} className="dns-list-row">
+                            <input
+                              className="dns-input"
+                              value={item}
+                              onChange={(e) => {
+                                setDnsForm(f => {
+                                  const arr = [...(f[key] ?? [])]
+                                  arr[idx] = e.target.value
+                                  return { ...f, [key]: arr }
+                                })
+                                setDnsDirty(true)
+                              }}
+                              placeholder="DNS 服务器地址"
+                            />
+                            <button
+                              className="dns-list-remove"
+                              type="button"
+                              onClick={() => {
+                                setDnsForm(f => ({ ...f, [key]: (f[key] ?? []).filter((_, i) => i !== idx) }))
+                                setDnsDirty(true)
+                              }}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                      <button
+                        className="dns-list-add"
+                        type="button"
+                        onClick={() => {
+                          setDnsForm(f => ({ ...f, [key]: [...(f[key] ?? []), ''] }))
+                          setDnsDirty(true)
+                        }}
+                      >
+                        + 添加
+                      </button>
+                    </div>
+                  ))}
+                </fieldset>
+
+                {/* --- 域名策略 --- */}
+                <fieldset className="dns-fieldset">
+                  <legend className="dns-legend">域名策略 (nameserver-policy)</legend>
+                  {(dnsForm['nameserver-policy'] ? Object.entries(dnsForm['nameserver-policy']) : []).map(([domain, server], idx) => (
+                    <div key={idx} className="dns-list-row">
+                      <input
+                        className="dns-input"
+                        value={domain}
+                        onChange={(e) => {
+                          setDnsForm(f => {
+                            const policy = { ...f['nameserver-policy'] }
+                            const entries = Object.entries(policy)
+                            const [, srv] = entries[idx]
+                            delete policy[domain]
+                            policy[e.target.value] = srv
+                            return { ...f, 'nameserver-policy': policy }
+                          })
+                          setDnsDirty(true)
+                        }}
+                        placeholder="+.company.internal"
+                      />
+                      <input
+                        className="dns-input"
+                        value={server}
+                        onChange={(e) => {
+                          setDnsForm(f => {
+                            const policy = { ...f['nameserver-policy'] }
+                            const entries = Object.entries(policy)
+                            const [dom] = entries[idx]
+                            policy[dom] = e.target.value
+                            return { ...f, 'nameserver-policy': policy }
+                          })
+                          setDnsDirty(true)
+                        }}
+                        placeholder="10.0.0.53"
+                      />
+                      <button
+                        className="dns-list-remove"
+                        type="button"
+                        onClick={() => {
+                          setDnsForm(f => {
+                            const policy = { ...f['nameserver-policy'] }
+                            const entries = Object.entries(policy)
+                            delete policy[entries[idx][0]]
+                            return { ...f, 'nameserver-policy': policy }
+                          })
+                          setDnsDirty(true)
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    className="dns-list-add"
+                    type="button"
+                    onClick={() => {
+                      setDnsForm(f => {
+                        const policy = { ...f['nameserver-policy'], '': '' }
+                        return { ...f, 'nameserver-policy': policy }
+                      })
+                      setDnsDirty(true)
+                    }}
+                  >
+                    + 添加策略
+                  </button>
+                </fieldset>
+
+                {/* --- Hosts 映射 --- */}
+                <fieldset className="dns-fieldset">
+                  <legend className="dns-legend">Hosts 映射</legend>
+                  {(dnsForm.hosts ? Object.entries(dnsForm.hosts) : []).map(([domain, ip], idx) => (
+                    <div key={idx} className="dns-list-row">
+                      <input
+                        className="dns-input"
+                        value={domain}
+                        onChange={(e) => {
+                          setDnsForm(f => {
+                            const hosts = { ...f.hosts }
+                            const entries = Object.entries(hosts)
+                            const [, ipAddr] = entries[idx]
+                            delete hosts[domain]
+                            hosts[e.target.value] = ipAddr
+                            return { ...f, hosts }
+                          })
+                          setDnsDirty(true)
+                        }}
+                        placeholder="example.local"
+                      />
+                      <input
+                        className="dns-input"
+                        value={ip}
+                        onChange={(e) => {
+                          setDnsForm(f => {
+                            const hosts = { ...f.hosts }
+                            const entries = Object.entries(hosts)
+                            const [dom] = entries[idx]
+                            hosts[dom] = e.target.value
+                            return { ...f, hosts }
+                          })
+                          setDnsDirty(true)
+                        }}
+                        placeholder="192.168.1.100"
+                      />
+                      <button
+                        className="dns-list-remove"
+                        type="button"
+                        onClick={() => {
+                          setDnsForm(f => {
+                            const hosts = { ...f.hosts }
+                            const entries = Object.entries(hosts)
+                            delete hosts[entries[idx][0]]
+                            return { ...f, hosts }
+                          })
+                          setDnsDirty(true)
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    className="dns-list-add"
+                    type="button"
+                    onClick={() => {
+                      setDnsForm(f => {
+                        const hosts = { ...f.hosts, '': '' }
+                        return { ...f, hosts }
+                      })
+                      setDnsDirty(true)
+                    }}
+                  >
+                    + 添加映射
+                  </button>
+                </fieldset>
+
+                {/* --- Fallback 过滤 --- */}
+                <fieldset className="dns-fieldset">
+                  <legend className="dns-legend">Fallback 过滤</legend>
+
+                  <label className="dns-field">
+                    <span>GeoIP 过滤</span>
+                    <button
+                      className={dnsForm['fallback-filter']?.geoip ? 'dns-mini-toggle active' : 'dns-mini-toggle'}
+                      type="button"
+                      role="switch"
+                      aria-checked={dnsForm['fallback-filter']?.geoip ?? false}
+                      onClick={() => {
+                        setDnsForm(f => ({
+                          ...f,
+                          'fallback-filter': { ...f['fallback-filter'], geoip: !f['fallback-filter']?.geoip },
+                        }))
+                        setDnsDirty(true)
+                      }}
+                    >
+                      <span className="toggle-track" aria-hidden="true" />
+                    </button>
+                  </label>
+
+                  <label className="dns-field">
+                    <span>GeoIP 代码</span>
+                    <input
+                      className="dns-input"
+                      value={dnsForm['fallback-filter']?.['geoip-code'] ?? 'CN'}
+                      onChange={(e) => {
+                        setDnsForm(f => ({
+                          ...f,
+                          'fallback-filter': { ...f['fallback-filter'], 'geoip-code': e.target.value },
+                        }))
+                        setDnsDirty(true)
+                      }}
+                      placeholder="CN"
+                    />
+                  </label>
+
+                  <div className="dns-field dns-list-field">
+                    <span className="dns-list-label">域名列表</span>
+                    <div className="dns-list-items">
+                      {(dnsForm['fallback-filter']?.domain ?? []).map((domain, idx) => (
+                        <div key={idx} className="dns-list-row">
+                          <input
+                            className="dns-input"
+                            value={domain}
+                            onChange={(e) => {
+                              setDnsForm(f => {
+                                const arr = [...(f['fallback-filter']?.domain ?? [])]
+                                arr[idx] = e.target.value
+                                return { ...f, 'fallback-filter': { ...f['fallback-filter'], domain: arr } }
+                              })
+                              setDnsDirty(true)
+                            }}
+                            placeholder="+.google.com"
+                          />
+                          <button
+                            className="dns-list-remove"
+                            type="button"
+                            onClick={() => {
+                              setDnsForm(f => ({
+                                ...f,
+                                'fallback-filter': {
+                                  ...f['fallback-filter'],
+                                  domain: (f['fallback-filter']?.domain ?? []).filter((_, i) => i !== idx),
+                                },
+                              }))
+                              setDnsDirty(true)
+                            }}
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <button
+                      className="dns-list-add"
+                      type="button"
+                      onClick={() => {
+                        setDnsForm(f => ({
+                          ...f,
+                          'fallback-filter': {
+                            ...f['fallback-filter'],
+                            domain: [...(f['fallback-filter']?.domain ?? []), ''],
+                          },
+                        }))
+                        setDnsDirty(true)
+                      }}
+                    >
+                      + 添加
+                    </button>
+                  </div>
+                </fieldset>
               </div>
             )}
 
