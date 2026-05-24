@@ -1243,9 +1243,11 @@ function App() {
                         type="button"
                         title="删除规则"
                         onClick={() => {
-                          const next = customRules.filter(r => r !== rule)
-                          setCustomRules(next)
-                          saveCustomRules(next)
+                          setCustomRules(prev => {
+                            const next = prev.filter(r => r !== rule)
+                            saveCustomRules(next)
+                            return next
+                          })
                         }}
                       >
                         ×
@@ -1254,11 +1256,9 @@ function App() {
                   ))
                 ) : (
                   <span className="rules-page-placeholder">
-                    {rulesSearch.trim()
-                      ? '未找到匹配的规则'
-                      : customRules.length === 0
-                        ? '暂无自定义规则，点击上方按钮添加'
-                        : '未找到匹配的规则'}
+                    {customRules.length === 0 && !rulesSearch.trim()
+                      ? '暂无自定义规则，点击上方按钮添加'
+                      : '未找到匹配的规则'}
                   </span>
                 )}
               </div>
