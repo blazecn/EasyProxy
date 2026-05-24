@@ -94,3 +94,37 @@ fn generated_proxy_group_preserves_provider_info_nodes() {
     assert!(config.contains("永久官网"));
     assert!(config.contains("🇭🇰 香港1"));
 }
+
+#[test]
+fn build_mihomo_config_with_tun_adds_tun_section() {
+    let config = build_mihomo_config(SAMPLE_SUBSCRIPTION, "rule", true).expect("config should build");
+
+    assert!(config.contains("tun:"));
+    assert!(config.contains("enable: true"));
+    assert!(config.contains("stack: system"));
+    assert!(config.contains("dns-hijack:"));
+    assert!(config.contains("any:53"));
+    assert!(config.contains("auto-route: true"));
+    assert!(config.contains("auto-detect-interface: true"));
+}
+
+#[test]
+fn build_mihomo_config_without_tun_omits_tun_section() {
+    let config = build_mihomo_config(SAMPLE_SUBSCRIPTION, "rule", false).expect("config should build");
+
+    assert!(!config.contains("tun:"));
+    assert!(!config.contains("enable: true"));
+    assert!(!config.contains("stack: system"));
+    assert!(!config.contains("auto-route: true"));
+    assert!(!config.contains("auto-detect-interface: true"));
+}
+
+#[test]
+fn build_mihomo_config_tun_with_anytls_uri() {
+    let config = build_mihomo_config(ANYTLS_URI_SUBSCRIPTION, "global", true).expect("config should build");
+
+    assert!(config.contains("type: anytls"));
+    assert!(config.contains("tun:"));
+    assert!(config.contains("stack: system"));
+    assert!(config.contains("mode: global"));
+}
