@@ -46,6 +46,33 @@ interface SavedSubscription extends ImportedSubscription {
 const savedSubscriptionsKey = 'easyproxy.subscriptions'
 const activeSubscriptionKey = 'easyproxy.activeSubscription'
 const selectedNodesKey = 'easyproxy.selectedNodes'
+const customRulesKey = 'easyproxy.customRules'
+
+function readCustomRules(): string[] {
+  try {
+    const saved = JSON.parse(localStorage.getItem(customRulesKey) ?? '[]')
+    return Array.isArray(saved) ? saved.filter((r): r is string => typeof r === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+export function saveCustomRules(rules: string[]) {
+  localStorage.setItem(customRulesKey, JSON.stringify(rules))
+}
+
+export function detectRuleType(input: string): string | null {
+  const trimmed = input.trim()
+  if (!trimmed) return null
+  if (trimmed.includes('://')) return null
+  // IP/CIDR pattern
+  if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(\/\d{1,2})?$/.test(trimmed)) return 'IP-CIDR'
+  // Domain pattern (contains dot)
+  if (trimmed.includes('.')) return 'DOMAIN-SUFFIX'
+  // Plain keyword
+  return 'DOMAIN-KEYWORD'
+}
+
 const browserPreviewMessage = '浏览器预览模式'
 
 function buildBrowserPreviewContent() {
@@ -352,6 +379,12 @@ function App() {
   const [nodeTypes, setNodeTypes] = useState<Record<string, string>>(initialSubscriptionState.nodeTypes)
   const [delays, setDelays] = useState<Record<string, { delay: number | null; error?: string | null }>>({})
   const [testingGroup, setTestingGroup] = useState<string | null>(null)
+  const [customRules, setCustomRules] = useState<string[]>(readCustomRules)
+  const [rulesTab, setRulesTab] = useState<'custom' | 'subscription'>('custom')
+  const [rulesSearch, setRulesSearch] = useState('')
+  const [showAddRuleModal, setShowAddRuleModal] = useState(false)
+  const [newRuleInput, setNewRuleInput] = useState('')
+  const [newRuleTarget, setNewRuleTarget] = useState<'Proxy' | 'DIRECT' | 'REJECT'>('Proxy')
   const [page, setPage] = useState<Page>('overview')
   const [overviewTab, setOverviewTab] = useState<'info' | 'nodes'>('info')
 
@@ -362,6 +395,27 @@ function App() {
     () => nodes.filter((node) => isSubscriptionInfoNode(node)),
     [nodes],
   )
+
+  const filteredCustomRules = useMemo(
+    () => rulesSearch.trim()
+      ? customRules.filter(r => r.toLowerCase().includes(rulesSearch.toLowerCase().trim()))
+      : customRules,
+    [customRules, rulesSearch],
+  )
+
+  const filteredSubscriptionRules = useMemo(
+    () => rulesSearch.trim()
+      ? rules.filter(r => r.toLowerCase().includes(rulesSearch.toLowerCase().trim()))
+      : rules,
+    [rules, rulesSearch],
+  )
+
+  // Stage: consumed by upcoming rules page UI tasks
+  void [setCustomRules, rulesTab, setRulesTab,
+    setRulesSearch, showAddRuleModal, setShowAddRuleModal,
+    newRuleInput, setNewRuleInput, newRuleTarget, setNewRuleTarget,
+    filteredCustomRules, filteredSubscriptionRules,
+  ]
 
   // Get a representative "current node" for the sidebar status — first select group's choice
   const statusNode = useMemo(() => {
