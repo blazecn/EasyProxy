@@ -24,7 +24,14 @@ serde_yaml = "0.9"
 base64 = "0.22"
 url = "2.5"
 urlencoding = "2.1"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
 log = "0.4"
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-log = "2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+[[bin]]
+name = "easyproxy-service"
+path = "src/service_main.rs"
