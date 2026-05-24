@@ -14,6 +14,12 @@ pub struct ProxyGroupSummary {
     pub nodes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsOverride {
+    pub enabled: bool,
+    pub config: serde_yaml::Value,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubscriptionSummary {
     pub nodes: Vec<String>,
@@ -56,13 +62,18 @@ pub fn parse_subscription(content: &str) -> Result<SubscriptionSummary, String> 
     }
 }
 
-pub fn build_mihomo_config(content: &str, mode: &str, tun_enabled: bool) -> Result<String, String> {
+pub fn build_mihomo_config(
+    content: &str,
+    mode: &str,
+    tun_enabled: bool,
+    dns_override: Option<&DnsOverride>,
+) -> Result<String, String> {
     let mut document = match parse_document(content)? {
         SubscriptionDocument::Clash(document) => document,
         SubscriptionDocument::UriList(nodes) => build_document_from_uri_nodes(nodes),
     };
 
-    apply_runtime_settings(&mut document, mode, tun_enabled)?;
+    apply_runtime_settings(&mut document, mode, tun_enabled, dns_override)?;
 
     serde_yaml::to_string(&document).map_err(|error| format!("生成 Mihomo 配置失败: {error}"))
 }
@@ -216,12 +227,18 @@ fn parse_uri_or_base64(content: &str) -> Option<Vec<UriProxyNode>> {
     parse_uri_subscription(&decoded).ok()
 }
 
-pub fn write_runtime_config(path: &Path, content: &str, mode: &str, tun_enabled: bool) -> Result<(), String> {
+pub fn write_runtime_config(
+    path: &Path,
+    content: &str,
+    mode: &str,
+    tun_enabled: bool,
+    dns_override: Option<&DnsOverride>,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("创建运行目录失败: {error}"))?;
     }
 
-    let config = build_mihomo_config(content, mode, tun_enabled)?;
+    let config = build_mihomo_config(content, mode, tun_enabled, dns_override)?;
     fs::write(path, config).map_err(|error| format!("写入 Mihomo 配置失败: {error}"))
 }
 
@@ -605,7 +622,12 @@ fn build_document_from_uri_nodes(nodes: Vec<UriProxyNode>) -> Value {
     Value::Mapping(root)
 }
 
-fn apply_runtime_settings(document: &mut Value, mode: &str, tun_enabled: bool) -> Result<(), String> {
+fn apply_runtime_settings(
+    document: &mut Value,
+    mode: &str,
+    tun_enabled: bool,
+    dns_override: Option<&DnsOverride>,
+) -> Result<(), String> {
     let root = document
         .as_mapping_mut()
         .ok_or_else(|| "订阅配置格式无效".to_string())?;
@@ -631,6 +653,12 @@ fn apply_runtime_settings(document: &mut Value, mode: &str, tun_enabled: bool) -
         insert_scalar(&mut tun_section, "auto-route", Value::Bool(true));
         insert_scalar(&mut tun_section, "auto-detect-interface", Value::Bool(true));
         root.insert(Value::String("tun".to_string()), Value::Mapping(tun_section));
+    }
+
+    if let Some(dns) = dns_override {
+        if dns.enabled {
+            root.insert(Value::String("dns".to_string()), dns.config.clone());
+        }
     }
 
     Ok(())
