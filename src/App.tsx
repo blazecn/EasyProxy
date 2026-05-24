@@ -385,8 +385,6 @@ function App() {
   const [showAddRuleModal, setShowAddRuleModal] = useState(false)
   const [newRuleInput, setNewRuleInput] = useState('')
   const [newRuleTarget, setNewRuleTarget] = useState<'Proxy' | 'DIRECT' | 'REJECT'>('Proxy')
-  // Stage: variables consumed by upcoming add-rule modal (Task 3)
-  void [showAddRuleModal, newRuleInput, newRuleTarget]
   const [page, setPage] = useState<Page>('overview')
   const [overviewTab, setOverviewTab] = useState<'info' | 'nodes'>('info')
 
@@ -410,6 +408,12 @@ function App() {
       ? rules.filter(r => r.toLowerCase().includes(rulesSearch.toLowerCase().trim()))
       : rules,
     [rules, rulesSearch],
+  )
+
+  const newRuleType = useMemo(() => detectRuleType(newRuleInput), [newRuleInput])
+  const newRuleValid = newRuleType !== null && newRuleInput.trim().length > 0
+  const newRuleDuplicate = customRules.some(
+    r => r === `${newRuleType},${newRuleInput.trim()},${newRuleTarget}`
   )
 
   // Get a representative "current node" for the sidebar status — first select group's choice
@@ -1282,6 +1286,73 @@ function App() {
           </>
         )}
       </section>
+
+      {showAddRuleModal && (
+        <div className="modal-overlay" onClick={() => setShowAddRuleModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h3 className="modal-title">添加规则</h3>
+
+            <label className="modal-label">域名 或 IP 地址</label>
+            <input
+              className="modal-input"
+              value={newRuleInput}
+              onChange={(e) => setNewRuleInput(e.target.value)}
+              placeholder="例如 google.com 或 192.168.1.0/24"
+              aria-label="规则匹配值"
+            />
+            {newRuleInput.trim() && !newRuleType && (
+              <span className="modal-hint modal-hint-error">
+                无法识别输入格式，请输入域名或 IP 地址
+              </span>
+            )}
+            {newRuleType && (
+              <span className="modal-hint">将生成为 {newRuleType} 类型规则</span>
+            )}
+            {newRuleDuplicate && (
+              <span className="modal-hint modal-hint-error">该规则已存在</span>
+            )}
+
+            <label className="modal-label">策略</label>
+            <div className="modal-targets">
+              {(['Proxy', 'DIRECT', 'REJECT'] as const).map((target) => (
+                <button
+                  key={target}
+                  className={`modal-target-btn ${target === newRuleTarget ? 'selected' : ''}`}
+                  type="button"
+                  onClick={() => setNewRuleTarget(target)}
+                >
+                  {target}
+                </button>
+              ))}
+            </div>
+
+            <div className="modal-actions">
+              <button
+                className="modal-cancel-btn"
+                type="button"
+                onClick={() => setShowAddRuleModal(false)}
+              >
+                取消
+              </button>
+              <button
+                className="modal-confirm-btn"
+                type="button"
+                disabled={!newRuleValid || newRuleDuplicate}
+                onClick={() => {
+                  if (!newRuleType) return
+                  const rule = `${newRuleType},${newRuleInput.trim()},${newRuleTarget}`
+                  const next = [...customRules, rule]
+                  setCustomRules(next)
+                  saveCustomRules(next)
+                  setShowAddRuleModal(false)
+                }}
+              >
+                添加
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   )
 }
