@@ -905,6 +905,12 @@ function App() {
     }
   }
 
+  useEffect(() => {
+    if (page === 'dns') {
+      loadDnsOverride()
+    }
+  }, [page])
+
   return (
     <main className="app-shell">
       {/* === Sidebar === */}
