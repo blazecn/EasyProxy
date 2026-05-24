@@ -2,6 +2,7 @@ pub mod config_service;
 pub mod core_manager;
 pub mod ipc;
 pub mod mihomo_api;
+pub mod service_manager;
 pub mod system_proxy;
 
 use config_service::{
