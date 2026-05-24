@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useSwipeable } from 'react-swipeable'
-import { ChevronDown, ChevronUp, Pencil, Check, Trash2 } from 'lucide-react'
+import { Pencil, Trash2, Layout, Share2, List } from 'lucide-react'
 import './App.css'
 
 type CoreStatus = 'Stopped' | 'Running'
@@ -216,69 +216,6 @@ function readInitialSubscriptionState() {
   }
 }
 
-interface SubscriptionCardProps {
-  subscription: SavedSubscription
-  isSwiped: boolean
-  isSelected: boolean
-  onSwipeOpen: () => void
-  onSwipeClose: () => void
-  onSwitch: () => void
-  onDelete: () => void
-  disabled: boolean
-  nodeCount: number
-}
-
-function SubscriptionCard({
-  subscription,
-  isSwiped,
-  isSelected,
-  onSwipeOpen,
-  onSwipeClose,
-  onSwitch,
-  onDelete,
-  disabled,
-  nodeCount,
-}: SubscriptionCardProps) {
-  const swipeHandlers = useSwipeable({
-    onSwipedLeft: () => onSwipeOpen(),
-    onSwipedRight: () => onSwipeClose(),
-    onTap: () => {
-      if (isSwiped) {
-        onSwipeClose()
-      } else {
-        onSwitch()
-      }
-    },
-    delta: 60,
-    preventScrollOnSwipe: true,
-    trackMouse: true,
-  })
-
-  return (
-    <div className="subscription-swipe-container" {...swipeHandlers}>
-      <button
-        className={`subscription-card-swipe ${isSwiped ? 'swiped' : ''} ${isSelected ? 'selected' : ''}`}
-        type="button"
-        disabled={disabled}
-      >
-        <span>{subscription.name}</span>
-        <small>{nodeCount} 个节点</small>
-      </button>
-      <button
-        className="subscription-delete-action"
-        type="button"
-        onClick={(event) => {
-          event.stopPropagation()
-          onDelete()
-        }}
-      >
-        <Trash2 size={16} />
-        <span>删除</span>
-      </button>
-    </div>
-  )
-}
-
 interface SidebarSubscriptionItemProps {
   subscription: SavedSubscription
   isSwiped: boolean
@@ -363,12 +300,11 @@ function App() {
   const [subscriptionNameDraft, setSubscriptionNameDraft] = useState('')
   const [message, setMessage] = useState('等待导入订阅')
   const [busyAction, setBusyAction] = useState<string | null>(null)
-  const [isNodePanelExpanded, setIsNodePanelExpanded] = useState(false)
   const [rules, setRules] = useState<string[]>([])
   const [swipedUrl, setSwipedUrl] = useState<string | null>(null)
+  const [page, setPage] = useState<Page>('overview')
 
   const statusText = enabled ? '已连接' : '未连接'
-  const shouldShowSubscriptionForm = savedSubscriptions.length === 0 || isAddingSubscription
   const currentSubscription = savedSubscriptions.find((item) => item.url === activeSubscription)
   const proxyNodes = useMemo(() => getProxyNodes(nodes), [nodes])
   const subscriptionInfoNodes = useMemo(
@@ -593,249 +529,342 @@ function App() {
     setMessage(nextEnabled ? 'TUN 模式已开启' : 'TUN 模式已关闭')
   }
 
-  function renderNodeButtons(listClassName = 'node-list') {
-    return (
-      <div className={listClassName}>
-        {proxyNodes.map((node, index) => (
-          <button
-            key={node}
-            className={node === selectedNode ? 'node selected' : 'node'}
-            type="button"
-            onClick={() => switchNode(node)}
-            disabled={busyAction === 'node'}
-          >
-            <span>{node}</span>
-            <small>{index === 0 ? '推荐' : `${42 + index * 18} ms`}</small>
-          </button>
-        ))}
-      </div>
-    )
-  }
-
   return (
     <main className="app-shell">
-      <section className="control-center" aria-label="EasyProxy 首页控制中心">
-        <section className="summary-bar" aria-label="当前代理摘要">
-          <p>{message}</p>
-          <span>状态：{statusText}</span>
-          <span>节点：{selectedNode}</span>
+      {/* === Sidebar === */}
+      <aside className="sidebar">
+        <div className="sidebar-section-title">EasyProxy</div>
+
+        <button
+          className={`nav-item ${page === 'overview' ? 'selected' : ''}`}
+          type="button"
+          onClick={() => setPage('overview')}
+        >
+          <span className="nav-icon">
+            <Layout size={16} />
+          </span>
+          总览
+        </button>
+        <button
+          className={`nav-item ${page === 'nodes' ? 'selected' : ''}`}
+          type="button"
+          onClick={() => setPage('nodes')}
+        >
+          <span className="nav-icon">
+            <Share2 size={16} />
+          </span>
+          线路切换
+        </button>
+        <button
+          className={`nav-item ${page === 'rules' ? 'selected' : ''}`}
+          type="button"
+          onClick={() => setPage('rules')}
+        >
+          <span className="nav-icon">
+            <List size={16} />
+          </span>
+          代理规则
+        </button>
+
+        <div className="sidebar-section-title">
+          <span>订阅</span>
           <button
-            className={enabled ? 'switch-control active' : 'switch-control'}
+            type="button"
+            aria-label="增加订阅"
+            onClick={() => {
+              setSubscriptionUrl('')
+              setIsAddingSubscription(true)
+            }}
+          >
+            +
+          </button>
+        </div>
+
+        {savedSubscriptions.map((subscription) => (
+          <SidebarSubscriptionItem
+            key={subscription.url}
+            subscription={subscription}
+            isSwiped={swipedUrl === subscription.url}
+            isSelected={activeSubscription === subscription.url}
+            onSwipeOpen={() => setSwipedUrl(subscription.url)}
+            onSwipeClose={() => setSwipedUrl(null)}
+            onSwitch={() => {
+              setSwipedUrl(null)
+              switchSavedSubscription(subscription.url)
+            }}
+            onDelete={() => deleteSubscription(subscription.url)}
+            disabled={busyAction === 'subscription'}
+            nodeCount={getProxyNodes(subscription.nodes).length}
+          />
+        ))}
+
+        {isAddingSubscription && (
+          <div className="sidebar-import-form">
+            <input
+              value={subscriptionUrl}
+              onChange={(event) => setSubscriptionUrl(event.target.value)}
+              placeholder="https://example.com/sub.yaml"
+              aria-label="订阅地址"
+            />
+            <button
+              type="button"
+              onClick={() => importSubscription()}
+              disabled={busyAction === 'subscription'}
+            >
+              {busyAction === 'subscription' ? '导入中' : '导入'}
+            </button>
+          </div>
+        )}
+
+        <div className="sidebar-status">
+          <div className="sidebar-status-row">
+            <span className={`sidebar-status-dot ${enabled ? 'active' : ''}`} />
+            <span className="sidebar-status-text">{statusText}</span>
+          </div>
+          <div className="sidebar-status-detail">
+            {selectedNode} · {proxyModeOptions.find((m) => m.value === proxyMode)?.label ?? proxyMode}
+          </div>
+        </div>
+
+        <div className="sidebar-toggles">
+          <button
+            className={enabled ? 'sidebar-toggle active' : 'sidebar-toggle'}
+            type="button"
             role="switch"
             aria-checked={enabled}
             aria-label="系统代理"
-            type="button"
             onClick={toggleProxy}
             disabled={busyAction === 'proxy'}
           >
             <span>系统代理</span>
-            <span className="switch-track" aria-hidden="true" />
+            <span className="toggle-track" aria-hidden="true" />
           </button>
           <button
-            className={tunEnabled ? 'switch-control active' : 'switch-control'}
+            className={tunEnabled ? 'sidebar-toggle active' : 'sidebar-toggle'}
+            type="button"
             role="switch"
             aria-checked={tunEnabled}
             aria-label="TUN 模式"
-            type="button"
             onClick={toggleTunMode}
           >
             <span>TUN 模式</span>
-            <span className="switch-track" aria-hidden="true" />
+            <span className="toggle-track" aria-hidden="true" />
           </button>
-        </section>
+        </div>
+      </aside>
 
-        {isNodePanelExpanded && proxyNodes.length > 0 ? (
-          <section className="node-panel-page" aria-label="线路切换">
-            <div className="node-heading">
-              <p className="label">线路</p>
-              <button
-                className="node-panel-icon"
-                type="button"
-                aria-label="收起线路"
-                onClick={() => setIsNodePanelExpanded(false)}
-              >
-                <ChevronUp size={14} />
-              </button>
+      {/* === Content Area === */}
+      <section className="content-area">
+        {page === 'overview' && (
+          <>
+            <div>
+              <h2>总览</h2>
+              <p className="subtitle">
+                {currentSubscription ? `${currentSubscription.name} 的代理状态` : '等待导入订阅'}
+              </p>
             </div>
-            {renderNodeButtons('node-list node-list-fullpage')}
-          </section>
-        ) : (
-          <section className="feature-grid" aria-label="核心功能">
-          <article className="feature-card">
-            <div className="card-heading">
-              <div className="subscription-heading">
-                <p className="label">订阅</p>
-                {currentSubscription &&
-                  (editingSubscriptionName ? (
-                    <div className="subscription-name-editor">
-                      <label htmlFor="subscription-name">订阅名称</label>
-                      <input
-                        id="subscription-name"
-                        value={subscriptionNameDraft}
-                        onChange={(event) => setSubscriptionNameDraft(event.target.value)}
-                      />
+
+            <div className="status-bar">
+              <strong>127.0.0.1:7890</strong>
+              <span className="status-bar-sep">·</span>
+              <span>{statusText}</span>
+              {currentSubscription && (
+                <>
+                  <span className="status-bar-sep">·</span>
+                  <span>{currentSubscription.format}</span>
+                </>
+              )}
+            </div>
+
+            <div className="overview-grid">
+              <article className="info-card">
+                <span className="card-label">订阅信息</span>
+                {currentSubscription ? (
+                  <>
+                    <div className="info-grid">
+                      {subscriptionInfoNodes.map((node) => {
+                        const info = splitInfoLine(node)
+                        return (
+                          <div key={node} className="info-cell">
+                            <span className="info-cell-label">{info.label}</span>
+                            <span className="info-cell-value">{info.value}</span>
+                          </div>
+                        )
+                      })}
+                      <div className="info-cell">
+                        <span className="info-cell-label">当前线路</span>
+                        <span className="info-cell-value accent">{selectedNode}</span>
+                      </div>
+                      <div className="info-cell">
+                        <span className="info-cell-label">节点数量</span>
+                        <span className="info-cell-value">{proxyNodes.length} 个</span>
+                      </div>
+                      <div className="info-cell">
+                        <span className="info-cell-label">代理模式</span>
+                        <span className="info-cell-value">
+                          {proxyModeOptions.find((m) => m.value === proxyMode)?.label ?? proxyMode}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="info-card-actions">
+                      <button type="button" onClick={startEditingSubscriptionName}>
+                        <Pencil size={12} />
+                        {' '}重命名
+                      </button>
                       <button
-                        className="card-icon-button"
+                        className="danger"
                         type="button"
-                        aria-label="保存订阅名称"
-                        onClick={saveSubscriptionName}
+                        onClick={() => deleteSubscription(activeSubscription)}
                       >
-                        <Check size={14} />
+                        <Trash2 size={12} />
+                        {' '}删除
                       </button>
                     </div>
-                  ) : (
-                    <div className="subscription-name-row">
-                      <span>{currentSubscription.name}</span>
-                      <button
-                        className="card-icon-button"
-                        type="button"
-                        aria-label="编辑订阅名称"
-                        onClick={startEditingSubscriptionName}
-                      >
-                        <Pencil size={14} />
-                      </button>
+                    <div className="info-card-modes">
+                      {proxyModeOptions.map((mode) => (
+                        <button
+                          key={mode.value}
+                          className={mode.value === proxyMode ? 'selected' : ''}
+                          type="button"
+                          onClick={() => switchProxyMode(mode.value)}
+                          disabled={busyAction === 'mode'}
+                        >
+                          {mode.label}
+                        </button>
+                      ))}
                     </div>
-                  ))}
-              </div>
-            </div>
-            {currentSubscription && (
-              <div className="subscription-overview">
-                <div>
-                  {subscriptionInfoNodes.map((node) => {
-                    const info = splitInfoLine(node)
-
-                    return (
-                      <span key={node} className="subscription-info-row">
-                        <span>{info.label}</span>
-                        <span>{info.value}</span>
-                      </span>
-                    )
-                  })}
-                  <span className="subscription-info-row">
-                    <span>当前线路</span>
-                    <span>{selectedNode}</span>
-                  </span>
-                  <span className="subscription-info-row">
-                    <span>节点数量</span>
-                    <span>{proxyNodes.length} 个</span>
-                  </span>
-                </div>
-              </div>
-            )}
-            {savedSubscriptions.length > 0 && (
-              <div className="subscription-list" aria-label="已保存订阅">
-                {savedSubscriptions.map((subscription) => (
-                  <SubscriptionCard
-                    key={subscription.url}
-                    subscription={subscription}
-                    isSwiped={swipedUrl === subscription.url}
-                    isSelected={activeSubscription === subscription.url}
-                    onSwipeOpen={() => setSwipedUrl(subscription.url)}
-                    onSwipeClose={() => setSwipedUrl(null)}
-                    onSwitch={() => {
-                      setSwipedUrl(null)
-                      switchSavedSubscription(subscription.url)
-                    }}
-                    onDelete={() => deleteSubscription(subscription.url)}
-                    disabled={busyAction === 'subscription'}
-                    nodeCount={getProxyNodes(subscription.nodes).length}
-                  />
-                ))}
-                <button
-                  className="subscription-card add-card"
-                  type="button"
-                  aria-label="增加订阅"
-                  onClick={() => {
-                    setSubscriptionUrl('')
-                    setIsAddingSubscription(true)
-                  }}
-                  disabled={busyAction === 'subscription'}
-                >
-                  <span>增加订阅</span>
-                  <small>导入新的订阅地址</small>
-                </button>
-              </div>
-            )}
-            {shouldShowSubscriptionForm && (
-              <div className="subscription-form">
-                <label htmlFor="subscription">订阅地址</label>
-                <div className="input-row">
-                  <input
-                    id="subscription"
-                    value={subscriptionUrl}
-                    onChange={(event) => setSubscriptionUrl(event.target.value)}
-                    placeholder="https://example.com/sub.yaml"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => importSubscription()}
-                    disabled={busyAction === 'subscription'}
-                  >
-                    {busyAction === 'subscription' ? '导入中' : '导入'}
-                  </button>
-                </div>
-              </div>
-            )}
-          </article>
-
-          {proxyNodes.length > 0 && (
-            <article className="feature-card node-card">
-              <div className="node-heading">
-                <p className="label">线路</p>
-                <button
-                  className="node-panel-icon"
-                  type="button"
-                  aria-label="展开线路"
-                  onClick={() => setIsNodePanelExpanded(true)}
-                >
-                  <ChevronDown size={14} />
-                </button>
-              </div>
-              {renderNodeButtons()}
-            </article>
-          )}
-
-          {savedSubscriptions.length > 0 && (
-            <article className="feature-card">
-              <div className="card-heading">
-                <div>
-                  <p className="label">模式</p>
-                </div>
-              </div>
-              <div className="mode-list" aria-label="模式切换">
-                {proxyModeOptions.map((mode) => (
-                  <button
-                    key={mode.value}
-                    className={mode.value === proxyMode ? 'mode-option selected' : 'mode-option'}
-                    type="button"
-                    onClick={() => switchProxyMode(mode.value)}
-                    disabled={busyAction === 'mode'}
-                  >
-                    {mode.label}
-                  </button>
-                ))}
-              </div>
-            </article>
-          )}
-
-          {savedSubscriptions.length > 0 && (
-            <article className="feature-card">
-              <div className="card-heading">
-                <p className="label">规则</p>
-              </div>
-              <div className="rule-list">
-                {rules.length > 0 ? (
-                  rules.map((rule) => (
-                    <span key={rule} className="rule-item">{rule}</span>
-                  ))
+                  </>
                 ) : (
-                  <span className="rule-item rule-placeholder">暂无规则数据</span>
+                  <p className="node-preview-more">{message}</p>
                 )}
-              </div>
-            </article>
-          )}
+              </article>
 
-        </section>
+              <article className="node-preview-card">
+                <div className="node-preview-header">
+                  <span className="card-label">线路</span>
+                  {proxyNodes.length > 3 && (
+                    <button type="button" onClick={() => setPage('nodes')}>
+                      查看全部 →
+                    </button>
+                  )}
+                </div>
+                {proxyNodes.length > 0 ? (
+                  <div className="node-preview-list">
+                    {proxyNodes.slice(0, 6).map((node, index) => (
+                      <button
+                        key={node}
+                        className={`node-preview-item ${node === selectedNode ? 'selected' : ''}`}
+                        type="button"
+                        onClick={() => switchNode(node)}
+                        disabled={busyAction === 'node'}
+                      >
+                        <span>{node}</span>
+                        <small>{index === 0 ? '推荐' : `${42 + index * 18} ms`}</small>
+                      </button>
+                    ))}
+                    {proxyNodes.length > 6 && (
+                      <div className="node-preview-more">
+                        + {proxyNodes.length - 6} 个更多
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="node-preview-more">暂无可用线路</p>
+                )}
+              </article>
+            </div>
+
+            {editingSubscriptionName && currentSubscription && (
+              <div style={{
+                position: 'fixed', inset: 0, display: 'flex', alignItems: 'center',
+                justifyContent: 'center', background: 'rgba(0,0,0,0.2)', zIndex: 100
+              }}>
+                <div style={{
+                  background: '#fff', borderRadius: 12, padding: 24, minWidth: 320,
+                  display: 'flex', flexDirection: 'column', gap: 14
+                }}>
+                  <h3 style={{ margin: 0, fontSize: 16 }}>编辑订阅名称</h3>
+                  <input
+                    style={{
+                      border: '1px solid rgba(0,0,0,0.1)', borderRadius: 8, padding: '8px 12px',
+                      font: 'inherit', fontSize: 14
+                    }}
+                    value={subscriptionNameDraft}
+                    onChange={(event) => setSubscriptionNameDraft(event.target.value)}
+                    aria-label="订阅名称"
+                  />
+                  <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                    <button
+                      style={{
+                        border: '1px solid rgba(0,0,0,0.1)', borderRadius: 8, padding: '6px 16px',
+                        background: '#fff', font: 'inherit', fontSize: 13, cursor: 'pointer'
+                      }}
+                      type="button"
+                      onClick={() => setEditingSubscriptionName(false)}
+                    >
+                      取消
+                    </button>
+                    <button
+                      style={{
+                        border: 0, borderRadius: 8, padding: '6px 16px',
+                        background: '#007aff', color: '#fff', font: 'inherit', fontSize: 13,
+                        fontWeight: 600, cursor: 'pointer'
+                      }}
+                      type="button"
+                      onClick={saveSubscriptionName}
+                    >
+                      保存
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        {page === 'nodes' && (
+          <>
+            <div>
+              <h2>线路切换</h2>
+              <p className="subtitle">
+                {proxyNodes.length} 个可用线路
+              </p>
+            </div>
+            <div className="node-page-list">
+              {proxyNodes.map((node, index) => (
+                <button
+                  key={node}
+                  className={`node-preview-item ${node === selectedNode ? 'selected' : ''}`}
+                  type="button"
+                  onClick={() => switchNode(node)}
+                  disabled={busyAction === 'node'}
+                >
+                  <span>{node}</span>
+                  <small>{index === 0 ? '推荐' : `${42 + index * 18} ms`}</small>
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+
+        {page === 'rules' && (
+          <>
+            <div>
+              <h2>代理规则</h2>
+              <p className="subtitle">
+                {rules.length > 0 ? `${rules.length} 条规则` : '暂无规则数据'}
+              </p>
+            </div>
+            <div className="rules-page-list">
+              {rules.length > 0 ? (
+                rules.map((rule) => (
+                  <span key={rule} className="rules-page-item">{rule}</span>
+                ))
+              ) : (
+                <span className="rules-page-placeholder">暂无规则数据</span>
+              )}
+            </div>
+          </>
         )}
       </section>
     </main>
