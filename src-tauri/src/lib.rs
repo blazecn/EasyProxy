@@ -20,6 +20,7 @@ use tauri::{Manager, State};
 struct AppState {
     subscription: Mutex<Option<String>>,
     mode: Mutex<ProxyMode>,
+    tun_enabled: Mutex<bool>,
     core: CoreManager,
     proxy: SystemProxy,
 }
@@ -72,6 +73,7 @@ fn save_subscription(
         &data_dir.join("mihomo.yaml"),
         &content,
         mode.as_mihomo_mode(),
+        false,
     )?;
     *state
         .subscription
@@ -138,10 +140,15 @@ fn set_proxy_mode(
         .map_err(|_| "读取订阅状态失败".to_string())?
         .as_ref()
     {
+        let tun_enabled = *state
+            .tun_enabled
+            .lock()
+            .map_err(|_| "读取 TUN 状态失败".to_string())?;
         write_runtime_config(
             &app_data_dir(&app)?.join("mihomo.yaml"),
             subscription,
             mode.as_mihomo_mode(),
+            tun_enabled,
         )?;
     }
 
@@ -208,6 +215,7 @@ pub fn run() {
             app.manage(AppState {
                 subscription: Mutex::new(None),
                 mode: Mutex::new(ProxyMode::Rule),
+                tun_enabled: Mutex::new(false),
                 core,
                 proxy: SystemProxy::new("127.0.0.1", 7890),
             });

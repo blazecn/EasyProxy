@@ -56,13 +56,13 @@ pub fn parse_subscription(content: &str) -> Result<SubscriptionSummary, String> 
     }
 }
 
-pub fn build_mihomo_config(content: &str, mode: &str) -> Result<String, String> {
+pub fn build_mihomo_config(content: &str, mode: &str, tun_enabled: bool) -> Result<String, String> {
     let mut document = match parse_document(content)? {
         SubscriptionDocument::Clash(document) => document,
         SubscriptionDocument::UriList(nodes) => build_document_from_uri_nodes(nodes),
     };
 
-    apply_runtime_settings(&mut document, mode)?;
+    apply_runtime_settings(&mut document, mode, tun_enabled)?;
 
     serde_yaml::to_string(&document).map_err(|error| format!("生成 Mihomo 配置失败: {error}"))
 }
@@ -216,12 +216,12 @@ fn parse_uri_or_base64(content: &str) -> Option<Vec<UriProxyNode>> {
     parse_uri_subscription(&decoded).ok()
 }
 
-pub fn write_runtime_config(path: &Path, content: &str, mode: &str) -> Result<(), String> {
+pub fn write_runtime_config(path: &Path, content: &str, mode: &str, tun_enabled: bool) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("创建运行目录失败: {error}"))?;
     }
 
-    let config = build_mihomo_config(content, mode)?;
+    let config = build_mihomo_config(content, mode, tun_enabled)?;
     fs::write(path, config).map_err(|error| format!("写入 Mihomo 配置失败: {error}"))
 }
 
@@ -605,7 +605,7 @@ fn build_document_from_uri_nodes(nodes: Vec<UriProxyNode>) -> Value {
     Value::Mapping(root)
 }
 
-fn apply_runtime_settings(document: &mut Value, mode: &str) -> Result<(), String> {
+fn apply_runtime_settings(document: &mut Value, mode: &str, tun_enabled: bool) -> Result<(), String> {
     let root = document
         .as_mapping_mut()
         .ok_or_else(|| "订阅配置格式无效".to_string())?;
@@ -619,6 +619,19 @@ fn apply_runtime_settings(document: &mut Value, mode: &str) -> Result<(), String
         Value::String("127.0.0.1:9090".to_string()),
     );
     insert_scalar(root, "secret", Value::String(String::new()));
+
+    if tun_enabled {
+        let mut tun_section = Mapping::new();
+        insert_scalar(&mut tun_section, "enable", Value::Bool(true));
+        insert_scalar(&mut tun_section, "stack", Value::String("system".to_string()));
+        tun_section.insert(
+            Value::String("dns-hijack".to_string()),
+            Value::Sequence(vec![Value::String("any:53".to_string())]),
+        );
+        insert_scalar(&mut tun_section, "auto-route", Value::Bool(true));
+        insert_scalar(&mut tun_section, "auto-detect-interface", Value::Bool(true));
+        root.insert(Value::String("tun".to_string()), Value::Mapping(tun_section));
+    }
 
     Ok(())
 }
