@@ -321,8 +321,9 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app_data_dir(app.handle())?;
             let core = default_core_manager(app.handle())?;
+            let subscription = std::fs::read_to_string(data_dir.join("subscription.yaml")).ok();
             app.manage(AppState {
-                subscription: Mutex::new(None),
+                subscription: Mutex::new(subscription),
                 mode: Mutex::new(ProxyMode::Rule),
                 tun_enabled: Mutex::new(false),
                 data_dir,
