@@ -385,6 +385,8 @@ function App() {
   const [showAddRuleModal, setShowAddRuleModal] = useState(false)
   const [newRuleInput, setNewRuleInput] = useState('')
   const [newRuleTarget, setNewRuleTarget] = useState<'Proxy' | 'DIRECT' | 'REJECT'>('Proxy')
+  // Stage: variables consumed by upcoming add-rule modal (Task 3)
+  void [showAddRuleModal, newRuleInput, newRuleTarget]
   const [page, setPage] = useState<Page>('overview')
   const [overviewTab, setOverviewTab] = useState<'info' | 'nodes'>('info')
 
@@ -409,13 +411,6 @@ function App() {
       : rules,
     [rules, rulesSearch],
   )
-
-  // Stage: consumed by upcoming rules page UI tasks
-  void [setCustomRules, rulesTab, setRulesTab,
-    setRulesSearch, showAddRuleModal, setShowAddRuleModal,
-    newRuleInput, setNewRuleInput, newRuleTarget, setNewRuleTarget,
-    filteredCustomRules, filteredSubscriptionRules,
-  ]
 
   // Get a representative "current node" for the sidebar status — first select group's choice
   const statusNode = useMemo(() => {
@@ -1195,18 +1190,95 @@ function App() {
             <div>
               <h2>代理规则</h2>
               <p className="subtitle">
-                {rules.length > 0 ? `${rules.length} 条规则` : '暂无规则数据'}
+                {customRules.length} 条自定义 · {rules.length} 条订阅
               </p>
             </div>
-            <div className="rules-page-list">
-              {rules.length > 0 ? (
-                rules.map((rule) => (
-                  <span key={rule} className="rules-page-item">{rule}</span>
-                ))
-              ) : (
-                <span className="rules-page-placeholder">暂无规则数据</span>
-              )}
+
+            <div className="rules-toolbar">
+              <input
+                className="rules-search"
+                value={rulesSearch}
+                onChange={(e) => setRulesSearch(e.target.value)}
+                placeholder="搜索规则..."
+                aria-label="搜索规则"
+              />
+              <button
+                className="rules-add-btn"
+                type="button"
+                onClick={() => {
+                  setNewRuleInput('')
+                  setNewRuleTarget('Proxy')
+                  setShowAddRuleModal(true)
+                }}
+              >
+                + 添加规则
+              </button>
             </div>
+
+            <div className="rules-tabs">
+              <button
+                className={`rules-tab ${rulesTab === 'custom' ? 'active' : ''}`}
+                type="button"
+                onClick={() => setRulesTab('custom')}
+              >
+                自定义规则 · {customRules.length} 条
+              </button>
+              <button
+                className={`rules-tab ${rulesTab === 'subscription' ? 'active' : ''}`}
+                type="button"
+                onClick={() => setRulesTab('subscription')}
+              >
+                订阅规则 · {rules.length} 条
+              </button>
+            </div>
+
+            {rulesTab === 'custom' && (
+              <div className="rules-page-list">
+                {filteredCustomRules.length > 0 ? (
+                  filteredCustomRules.map((rule) => (
+                    <div key={rule} className="rules-page-item rules-page-item-custom">
+                      <span>{rule}</span>
+                      <button
+                        className="rules-delete-btn"
+                        type="button"
+                        title="删除规则"
+                        onClick={() => {
+                          const next = customRules.filter(r => r !== rule)
+                          setCustomRules(next)
+                          saveCustomRules(next)
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))
+                ) : (
+                  <span className="rules-page-placeholder">
+                    {rulesSearch.trim()
+                      ? '未找到匹配的规则'
+                      : customRules.length === 0
+                        ? '暂无自定义规则，点击上方按钮添加'
+                        : '未找到匹配的规则'}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {rulesTab === 'subscription' && (
+              <div className="rules-page-list">
+                {filteredSubscriptionRules.length > 0 ? (
+                  filteredSubscriptionRules.map((rule) => (
+                    <span key={rule} className="rules-page-item">{rule}</span>
+                  ))
+                ) : (
+                  <span className="rules-page-placeholder">
+                    {rules.length === 0
+                      ? '暂无规则数据'
+                      : '未找到匹配的规则'}
+                  </span>
+                )}
+              </div>
+            )}
           </>
         )}
       </section>
