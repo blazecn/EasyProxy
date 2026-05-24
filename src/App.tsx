@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { Pencil, Trash2, Layout, Share2, List, ChevronDown } from 'lucide-react'
+import { Pencil, Trash2, Layout, Share2, List, ChevronDown, Globe } from 'lucide-react'
 import './App.css'
 
 type CoreStatus = 'Stopped' | 'Running'
 type BackendProxyMode = 'Rule' | 'Global' | 'Direct'
-type Page = 'overview' | 'nodes' | 'rules'
+type Page = 'overview' | 'nodes' | 'rules' | 'dns'
 
 const proxyModeOptions: Array<{ value: BackendProxyMode; label: string }> = [
   { value: 'Rule', label: '规则模式' },
@@ -388,6 +388,45 @@ function App() {
   const [page, setPage] = useState<Page>('overview')
   const [overviewTab, setOverviewTab] = useState<'info' | 'nodes'>('info')
 
+  interface DnsOverrideConfig {
+    enable?: boolean
+    listen?: string
+    'enhanced-mode'?: string
+    ipv6?: boolean
+    nameserver?: string[]
+    fallback?: string[]
+    'default-nameserver'?: string[]
+    'nameserver-policy'?: Record<string, string>
+    hosts?: Record<string, string>
+    'fallback-filter'?: {
+      geoip?: boolean
+      'geoip-code'?: string
+      domain?: string[]
+    }
+  }
+
+  interface DnsOverrideData {
+    enabled: boolean
+    config: DnsOverrideConfig
+  }
+
+  const defaultDnsConfig: DnsOverrideConfig = {
+    enable: true,
+    listen: '0.0.0.0:53',
+    'enhanced-mode': 'fake-ip',
+    ipv6: false,
+    nameserver: ['223.5.5.5'],
+    fallback: ['8.8.8.8'],
+    'default-nameserver': ['223.5.5.5'],
+  }
+
+  const [dnsOverride, setDnsOverride] = useState<DnsOverrideData | null>(null)
+  const [dnsTab, setDnsTab] = useState<'form' | 'yaml'>('form')
+  const [dnsForm, setDnsForm] = useState<DnsOverrideConfig>(defaultDnsConfig)
+  const [dnsYaml, setDnsYaml] = useState('')
+  const [dnsYamlError, setDnsYamlError] = useState('')
+  const [dnsDirty, setDnsDirty] = useState(false)
+
   const statusText = enabled ? '已连接' : '未连接'
   const currentSubscription = savedSubscriptions.find((item) => item.url === activeSubscription)
   const proxyNodes = useMemo(() => getProxyNodes(nodes), [nodes])
@@ -698,6 +737,174 @@ function App() {
     }
   }
 
+  function formToYaml(config: DnsOverrideConfig): string {
+    const lines: string[] = ['dns:']
+    if (config.enable !== undefined) lines.push(`  enable: ${config.enable}`)
+    if (config.listen) lines.push(`  listen: ${config.listen}`)
+    if (config['enhanced-mode']) lines.push(`  enhanced-mode: ${config['enhanced-mode']}`)
+    if (config.ipv6 !== undefined) lines.push(`  ipv6: ${config.ipv6}`)
+    if (config['default-nameserver'] && config['default-nameserver'].length > 0) {
+      lines.push('  default-nameserver:')
+      for (const ns of config['default-nameserver']) lines.push(`    - ${ns}`)
+    }
+    if (config.nameserver && config.nameserver.length > 0) {
+      lines.push('  nameserver:')
+      for (const ns of config.nameserver) lines.push(`    - ${ns}`)
+    }
+    if (config.fallback && config.fallback.length > 0) {
+      lines.push('  fallback:')
+      for (const ns of config.fallback) lines.push(`    - ${ns}`)
+    }
+    if (config['nameserver-policy'] && Object.keys(config['nameserver-policy']).length > 0) {
+      lines.push('  nameserver-policy:')
+      for (const [domain, server] of Object.entries(config['nameserver-policy'])) {
+        lines.push(`    '${domain}': '${server}'`)
+      }
+    }
+    if (config.hosts && Object.keys(config.hosts).length > 0) {
+      lines.push('  hosts:')
+      for (const [domain, ip] of Object.entries(config.hosts)) {
+        lines.push(`    '${domain}': ${ip}`)
+      }
+    }
+    if (config['fallback-filter']) {
+      lines.push('  fallback-filter:')
+      if (config['fallback-filter'].geoip !== undefined) {
+        lines.push(`    geoip: ${config['fallback-filter'].geoip}`)
+      }
+      if (config['fallback-filter']['geoip-code']) {
+        lines.push(`    geoip-code: ${config['fallback-filter']['geoip-code']}`)
+      }
+      if (config['fallback-filter'].domain && config['fallback-filter'].domain.length > 0) {
+        lines.push('    domain:')
+        for (const d of config['fallback-filter'].domain) lines.push(`      - '${d}'`)
+      }
+    }
+    return lines.join('\n')
+  }
+
+  function parseDnsYaml(yaml: string): DnsOverrideConfig | null {
+    const lines = yaml.trim().split('\n').filter(l => l.trim() !== 'dns:')
+    const result: DnsOverrideConfig = {}
+    const listFields = ['nameserver', 'fallback', 'default-nameserver']
+    const policyMap: Record<string, string> = {}
+    const hostsMap: Record<string, string> = {}
+    const ffDomain: string[] = []
+
+    let currentList: string | null = null
+    let currentMap: 'policy' | 'hosts' | 'ff-domain' | null = null
+
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+
+      const kvMatch = trimmed.match(/^(\S[^:]*):\s*(.+)$/)
+      const listItemMatch = trimmed.match(/^\s*-\s+(.+)$/)
+
+      if (kvMatch && !trimmed.startsWith('-') && !trimmed.startsWith("'")) {
+        const key = kvMatch[1].trim()
+        const value = kvMatch[2].trim()
+
+        if (key === 'enable' || key === 'ipv6') {
+          ;(result as Record<string, unknown>)[key] = value === 'true'
+          currentList = null
+          currentMap = null
+        } else if (listFields.includes(key)) {
+          ;(result as Record<string, unknown>)[key] = []
+          currentList = key
+          currentMap = null
+        } else if (key === 'listen' || key === 'enhanced-mode' || key === 'geoip-code') {
+          ;(result as Record<string, unknown>)[key] = value
+          currentList = null
+          currentMap = null
+        } else if (key === 'nameserver-policy') {
+          currentMap = 'policy'
+          currentList = null
+        } else if (key === 'hosts') {
+          currentMap = 'hosts'
+          currentList = null
+        } else if (key === 'geoip') {
+          if (!result['fallback-filter']) result['fallback-filter'] = {}
+          ;(result as Record<string, unknown>)['fallback-filter'] = {
+            ...result['fallback-filter'],
+            geoip: value === 'true',
+          }
+          currentList = null
+          currentMap = null
+        } else if (key === 'domain') {
+          currentMap = 'ff-domain'
+          currentList = null
+          if (!result['fallback-filter']) result['fallback-filter'] = {}
+          result['fallback-filter'].domain = []
+        }
+      } else if (listItemMatch && currentList) {
+        const arr = (result as Record<string, unknown>)[currentList] as string[]
+        if (arr) arr.push(listItemMatch[1].trim())
+      } else if (listItemMatch && currentMap === 'ff-domain') {
+        ffDomain.push(listItemMatch[1].trim().replace(/^'|'$/g, ''))
+      }
+    }
+
+    if (Object.keys(policyMap).length > 0) result['nameserver-policy'] = policyMap
+    if (Object.keys(hostsMap).length > 0) result.hosts = hostsMap
+    if (ffDomain.length > 0 && result['fallback-filter']) {
+      result['fallback-filter'].domain = ffDomain
+    }
+
+    return result
+  }
+
+  async function loadDnsOverride() {
+    try {
+      const data = await invoke<DnsOverrideData | null>('get_dns_override')
+      if (data) {
+        setDnsOverride(data)
+        setDnsForm(data.config)
+        setDnsYaml(formToYaml(data.config))
+      } else {
+        setDnsOverride({ enabled: false, config: defaultDnsConfig })
+        setDnsForm(defaultDnsConfig)
+        setDnsYaml(formToYaml(defaultDnsConfig))
+      }
+      setDnsDirty(false)
+    } catch (error) {
+      setMessage(displayError(error))
+    }
+  }
+
+  async function saveDnsOverride() {
+    if (!dnsOverride) return
+
+    let config: DnsOverrideConfig
+
+    if (dnsTab === 'yaml') {
+      const parsed = parseDnsYaml(dnsYaml)
+      if (!parsed) {
+        setDnsYamlError('YAML 格式错误，请检查后重试')
+        return
+      }
+      config = parsed
+    } else {
+      config = dnsForm
+    }
+
+    const data: DnsOverrideData = { enabled: dnsOverride.enabled, config }
+    try {
+      const status = await invoke<AppStatus>('set_dns_override', data)
+      setDnsOverride(data)
+      setDnsForm(config)
+      setDnsYaml(formToYaml(config))
+      setDnsYamlError('')
+      setDnsDirty(false)
+      setEnabled(status.system_proxy !== '')
+      setProxyMode(status.mode)
+      setTunEnabled(status.tun_enabled)
+      setMessage('DNS 覆写配置已保存')
+    } catch (error) {
+      setMessage(displayError(error))
+    }
+  }
+
   return (
     <main className="app-shell">
       {/* === Sidebar === */}
@@ -733,6 +940,16 @@ function App() {
             <List size={16} />
           </span>
           代理规则
+        </button>
+        <button
+          className={`nav-item ${page === 'dns' ? 'selected' : ''}`}
+          type="button"
+          onClick={() => setPage('dns')}
+        >
+          <span className="nav-icon">
+            <Globe size={16} />
+          </span>
+          DNS
         </button>
 
         <div className="sidebar-section-title">
@@ -1281,6 +1498,108 @@ function App() {
                       : '未找到匹配的规则'}
                   </span>
                 )}
+              </div>
+            )}
+          </>
+        )}
+
+        {page === 'dns' && (
+          <>
+            <div>
+              <h2>DNS 覆写</h2>
+              <p className="subtitle">
+                自定义 DNS 配置以覆盖订阅自带的 DNS 设置
+              </p>
+            </div>
+
+            <div className="dns-toggle-bar">
+              <span>启用 DNS 覆写</span>
+              <button
+                className={dnsOverride?.enabled ? 'dns-toggle active' : 'dns-toggle'}
+                type="button"
+                role="switch"
+                aria-checked={dnsOverride?.enabled ?? false}
+                onClick={() => {
+                  if (!dnsOverride) return
+                  const next = { ...dnsOverride, enabled: !dnsOverride.enabled }
+                  setDnsOverride(next)
+                  setDnsDirty(true)
+                }}
+              >
+                <span className="toggle-track" aria-hidden="true" />
+              </button>
+            </div>
+
+            <div className="dns-tabs">
+              <button
+                className={`dns-tab ${dnsTab === 'form' ? 'active' : ''}`}
+                type="button"
+                onClick={() => {
+                  if (dnsTab === 'yaml') {
+                    setDnsYaml(formToYaml(dnsForm))
+                    setDnsYamlError('')
+                  }
+                  setDnsTab('form')
+                }}
+              >
+                表单模式
+              </button>
+              <button
+                className={`dns-tab ${dnsTab === 'yaml' ? 'active' : ''}`}
+                type="button"
+                onClick={() => {
+                  setDnsYaml(formToYaml(dnsForm))
+                  setDnsYamlError('')
+                  setDnsTab('yaml')
+                }}
+              >
+                YAML 高级编辑
+              </button>
+            </div>
+
+            {dnsTab === 'form' && (
+              <div className="dns-form">
+                {/* Task 5 fills this in */}
+                <p className="node-preview-more">表单模式 — 待实现</p>
+              </div>
+            )}
+
+            {dnsTab === 'yaml' && (
+              <div className="dns-yaml-editor">
+                <textarea
+                  className="dns-yaml-textarea"
+                  value={dnsYaml}
+                  onChange={(e) => {
+                    setDnsYaml(e.target.value)
+                    setDnsDirty(true)
+                  }}
+                  spellCheck={false}
+                  aria-label="DNS YAML 配置"
+                />
+                {dnsYamlError && (
+                  <span className="dns-yaml-error">{dnsYamlError}</span>
+                )}
+              </div>
+            )}
+
+            {dnsDirty && (
+              <div className="dns-actions">
+                <button
+                  className="dns-save-btn"
+                  type="button"
+                  onClick={() => saveDnsOverride()}
+                >
+                  保存
+                </button>
+                <button
+                  className="dns-cancel-btn"
+                  type="button"
+                  onClick={() => {
+                    loadDnsOverride()
+                  }}
+                >
+                  取消
+                </button>
               </div>
             )}
           </>
