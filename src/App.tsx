@@ -862,7 +862,7 @@ function App() {
         setDnsForm(data.config)
         setDnsYaml(formToYaml(data.config))
       } else {
-        setDnsOverride({ enabled: false, config: defaultDnsConfig })
+        setDnsOverride({ enabled: true, config: defaultDnsConfig })
         setDnsForm(defaultDnsConfig)
         setDnsYaml(formToYaml(defaultDnsConfig))
       }
