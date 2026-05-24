@@ -21,6 +21,7 @@ struct AppState {
     subscription: Mutex<Option<String>>,
     mode: Mutex<ProxyMode>,
     tun_enabled: Mutex<bool>,
+    data_dir: PathBuf,
     core: CoreManager,
     proxy: SystemProxy,
 }
@@ -30,6 +31,7 @@ struct AppStatus {
     core: CoreStatus,
     mode: ProxyMode,
     system_proxy: String,
+    tun_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,11 +50,16 @@ fn core_status(state: State<'_, AppState>) -> Result<AppStatus, String> {
         .mode
         .lock()
         .map_err(|_| "读取模式状态失败".to_string())?;
+    let tun_enabled = *state
+        .tun_enabled
+        .lock()
+        .map_err(|_| "读取 TUN 状态失败".to_string())?;
 
     Ok(AppStatus {
         core: state.core.status(),
         mode,
         system_proxy: state.proxy.endpoint(),
+        tun_enabled,
     })
 }
 
@@ -156,16 +163,14 @@ fn set_proxy_mode(
 }
 
 #[tauri::command]
-fn start_core(state: State<'_, AppState>) -> Result<AppStatus, String> {
-    state.core.start()?;
-    let _ = state.proxy.enable();
+fn start_core(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<AppStatus, String> {
+    start_core_inner(&app, &state)?;
     core_status(state)
 }
 
 #[tauri::command]
 fn stop_core(state: State<'_, AppState>) -> Result<AppStatus, String> {
-    let _ = state.proxy.disable();
-    state.core.stop()?;
+    stop_core_inner(&state)?;
     core_status(state)
 }
 
@@ -207,15 +212,120 @@ fn default_core_manager(app: &tauri::AppHandle) -> Result<CoreManager, String> {
     Ok(CoreManager::new(binary_path, data_dir.join("mihomo.yaml")))
 }
 
+fn stop_core_inner(state: &AppState) -> Result<(), String> {
+    let tun_enabled = *state
+        .tun_enabled
+        .lock()
+        .map_err(|_| "读取 TUN 状态失败".to_string())?;
+    if tun_enabled {
+        let mut stream = ipc::connect()?;
+        let msg = ipc::IpcMessage::new("stop", None);
+        ipc::send_message(&mut stream, &msg)?;
+        let _resp = ipc::recv_message(&mut stream)?;
+    } else {
+        let _ = state.proxy.disable();
+        state.core.stop()?;
+    }
+    Ok(())
+}
+
+fn start_core_inner(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
+    let tun_enabled = *state
+        .tun_enabled
+        .lock()
+        .map_err(|_| "读取 TUN 状态失败".to_string())?;
+    if tun_enabled {
+        let binary_path = app
+            .path()
+            .resource_dir()
+            .map_err(|e| format!("获取资源目录失败: {e}"))?
+            .join("binaries")
+            .join("mihomo");
+        let config_path = state.data_dir.join("mihomo.yaml");
+
+        let mut stream = ipc::connect()?;
+        let msg = ipc::IpcMessage::new(
+            "start",
+            Some(serde_json::json!({
+                "binary_path": binary_path.to_str().unwrap_or(""),
+                "config_path": config_path.to_str().unwrap_or(""),
+            })),
+        );
+        ipc::send_message(&mut stream, &msg)?;
+        let _resp = ipc::recv_message(&mut stream)?;
+    } else {
+        state.core.start()?;
+        let _ = state.proxy.enable();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_tun_mode(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<AppStatus, String> {
+    if !cfg!(target_os = "macos") {
+        return Err("TUN 模式当前仅支持 macOS".to_string());
+    }
+
+    if enabled && !service_manager::is_installed() {
+        let service_bin = app
+            .path()
+            .resource_dir()
+            .map_err(|e| format!("获取资源目录失败: {e}"))?
+            .join("binaries")
+            .join("easyproxy-service");
+        service_manager::install(service_bin.to_str().unwrap_or(""))?;
+    }
+
+    let was_running = state.core.status() == CoreStatus::Running;
+    if was_running {
+        stop_core_inner(&state)?;
+    }
+
+    *state
+        .tun_enabled
+        .lock()
+        .map_err(|_| "保存 TUN 状态失败".to_string())? = enabled;
+
+    if let Some(sub) = state
+        .subscription
+        .lock()
+        .map_err(|_| "读取订阅失败".to_string())?
+        .as_ref()
+    {
+        write_runtime_config(
+            &state.data_dir.join("mihomo.yaml"),
+            sub,
+            state
+                .mode
+                .lock()
+                .map_err(|_| "读取模式失败".to_string())?
+                .as_mihomo_mode(),
+            enabled,
+        )?;
+    }
+
+    if was_running {
+        start_core_inner(&app, &state)?;
+    }
+
+    core_status(state)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            let data_dir = app_data_dir(app.handle())?;
             let core = default_core_manager(app.handle())?;
             app.manage(AppState {
                 subscription: Mutex::new(None),
                 mode: Mutex::new(ProxyMode::Rule),
                 tun_enabled: Mutex::new(false),
+                data_dir,
                 core,
                 proxy: SystemProxy::new("127.0.0.1", 7890),
             });
@@ -234,6 +344,7 @@ pub fn run() {
             refresh_subscription,
             select_proxy_node,
             set_proxy_mode,
+            set_tun_mode,
             start_core,
             stop_core,
             test_delays
