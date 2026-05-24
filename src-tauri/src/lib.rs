@@ -21,6 +21,7 @@ struct AppState {
     subscription: Mutex<Option<String>>,
     mode: Mutex<ProxyMode>,
     tun_enabled: Mutex<bool>,
+    dns_override: Mutex<Option<config_service::DnsOverride>>,
     data_dir: PathBuf,
     core: CoreManager,
     proxy: SystemProxy,
@@ -85,11 +86,17 @@ fn save_subscription(
         .mode
         .lock()
         .map_err(|_| "读取模式状态失败".to_string())?;
+    let dns_override = state
+        .dns_override
+        .lock()
+        .map_err(|_| "读取 DNS 覆写失败".to_string())?
+        .clone();
     write_runtime_config(
         &data_dir.join("mihomo.yaml"),
         &content,
         mode.as_mihomo_mode(),
         false,
+        dns_override.as_ref(),
     )?;
     *state
         .subscription
@@ -160,11 +167,17 @@ fn set_proxy_mode(
             .tun_enabled
             .lock()
             .map_err(|_| "读取 TUN 状态失败".to_string())?;
+        let dns_override = state
+            .dns_override
+            .lock()
+            .map_err(|_| "读取 DNS 覆写失败".to_string())?
+            .clone();
         write_runtime_config(
             &app_data_dir(&app)?.join("mihomo.yaml"),
             subscription,
             mode.as_mihomo_mode(),
             tun_enabled,
+            dns_override.as_ref(),
         )?;
     }
 
@@ -216,6 +229,61 @@ async fn test_delays(nodes: Vec<String>) -> Result<std::collections::BTreeMap<St
     tauri::async_runtime::spawn_blocking(move || mihomo_api::test_proxy_delays(&nodes))
         .await
         .map_err(|e| format!("测速失败: {e}"))
+}
+
+#[tauri::command]
+fn get_dns_override(state: State<'_, AppState>) -> Result<Option<config_service::DnsOverride>, String> {
+    Ok(state
+        .dns_override
+        .lock()
+        .map_err(|_| "读取 DNS 覆写状态失败".to_string())?
+        .clone())
+}
+
+#[tauri::command]
+fn set_dns_override(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    dns_override: config_service::DnsOverride,
+) -> Result<AppStatus, String> {
+    let data_dir = app_data_dir(&app)?;
+    let yaml = serde_yaml::to_string(&dns_override)
+        .map_err(|e| format!("序列化 DNS 覆写配置失败: {e}"))?;
+    std::fs::write(data_dir.join("dns_override.yaml"), yaml)
+        .map_err(|e| format!("保存 DNS 覆写配置失败: {e}"))?;
+
+    *state
+        .dns_override
+        .lock()
+        .map_err(|_| "保存 DNS 覆写状态失败".to_string())? = Some(dns_override);
+
+    let subscription = state
+        .subscription
+        .lock()
+        .map_err(|_| "读取订阅失败".to_string())?
+        .clone();
+    let mode = *state.mode.lock().map_err(|_| "读取模式失败".to_string())?;
+    let tun_enabled = *state
+        .tun_enabled
+        .lock()
+        .map_err(|_| "读取 TUN 状态失败".to_string())?;
+
+    if let Some(ref sub) = subscription {
+        let dns_ref = state
+            .dns_override
+            .lock()
+            .map_err(|_| "读取 DNS 覆写失败".to_string())?
+            .clone();
+        write_runtime_config(
+            &data_dir.join("mihomo.yaml"),
+            sub,
+            mode.as_mihomo_mode(),
+            tun_enabled,
+            dns_ref.as_ref(),
+        )?;
+    }
+
+    core_status_inner(&state)
 }
 
 fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -375,8 +443,19 @@ async fn set_tun_mode(
     if let Some(ref sub) = subscription {
         let config_path = data_dir.join("mihomo.yaml");
         let sub = sub.clone();
+        let dns = state
+            .dns_override
+            .lock()
+            .map_err(|_| "读取 DNS 覆写失败".to_string())?
+            .clone();
         tauri::async_runtime::spawn_blocking(move || {
-            write_runtime_config(&config_path, &sub, mode.as_mihomo_mode(), enabled)
+            write_runtime_config(
+                &config_path,
+                &sub,
+                mode.as_mihomo_mode(),
+                enabled,
+                dns.as_ref(),
+            )
         })
         .await
         .map_err(|e| format!("写入配置失败: {e}"))??;
@@ -404,10 +483,14 @@ pub fn run() {
             let data_dir = app_data_dir(app.handle())?;
             let core = default_core_manager(app.handle())?;
             let subscription = std::fs::read_to_string(data_dir.join("subscription.yaml")).ok();
+            let dns_override = std::fs::read_to_string(data_dir.join("dns_override.yaml"))
+                .ok()
+                .and_then(|s| serde_yaml::from_str(&s).ok());
             app.manage(AppState {
                 subscription: Mutex::new(subscription),
                 mode: Mutex::new(ProxyMode::Rule),
                 tun_enabled: Mutex::new(false),
+                dns_override: Mutex::new(dns_override),
                 data_dir,
                 core,
                 proxy: SystemProxy::new("127.0.0.1", 7890),
@@ -436,7 +519,9 @@ pub fn run() {
             set_tun_mode,
             start_core,
             stop_core,
-            test_delays
+            test_delays,
+            get_dns_override,
+            set_dns_override,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
