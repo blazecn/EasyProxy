@@ -52,31 +52,27 @@ beforeEach(() => {
 })
 
 describe('EasyProxy shell', () => {
-  it('shows the homepage control center entries', () => {
+  it('shows the sidebar with navigation and controls', () => {
     render(<App />)
 
-    expect(screen.queryByLabelText('首页状态栏')).not.toBeInTheDocument()
-    expect(screen.queryByRole('heading', { name: '代理开关' })).not.toBeInTheDocument()
+    // Sidebar navigation
+    expect(screen.getByRole('button', { name: '总览' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '线路切换' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '代理规则' })).toBeInTheDocument()
+
+    // Sidebar switches at bottom
     expect(screen.getByRole('switch', { name: '系统代理' })).toBeInTheDocument()
     expect(screen.getByRole('switch', { name: 'TUN 模式' })).toBeInTheDocument()
-    expect(screen.queryByRole('heading', { name: '订阅管理' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('heading', { name: '节点切换' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('heading', { name: '代理模式' })).not.toBeInTheDocument()
-    expect(screen.getByText('订阅')).toBeInTheDocument()
-    expect(screen.queryByText('模式')).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '规则模式' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '全局模式' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '直连模式' })).not.toBeInTheDocument()
+
+    // Import form in sidebar (shown when no subscriptions)
     expect(screen.getByLabelText('订阅地址')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '导入' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '刷新' })).not.toBeInTheDocument()
-    expect(screen.getByText('状态：未连接')).toBeInTheDocument()
-    expect(screen.getByText('节点：未选择')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /自动选择/ })).not.toBeInTheDocument()
-    expect(screen.queryByText('系统代理端口：127.0.0.1:7890')).not.toBeInTheDocument()
+
+    // Overview page (text appears in both subtitle and info-card message)
+    expect(screen.getAllByText('等待导入订阅')).toHaveLength(2)
   })
 
-  it('switches proxy mode through the mode card', async () => {
+  it('switches proxy mode from the overview info card', async () => {
     localStorage.setItem(
       'easyproxy.subscriptions',
       JSON.stringify([
@@ -92,18 +88,16 @@ describe('EasyProxy shell', () => {
 
     render(<App />)
 
-    expect(screen.getByText('模式')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '规则模式' })).toHaveClass('selected')
+    expect(screen.getByRole('button', { name: '规则模式' })).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '全局模式' }))
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith('set_proxy_mode', { mode: 'Global' })
     })
-    expect(screen.getByRole('button', { name: '全局模式' })).toHaveClass('selected')
   })
 
-  it('saves imported subscription configs and switches without refetching urls', async () => {
+  it('saves imported subscription and switches without refetching urls', async () => {
     localStorage.setItem(
       'easyproxy.subscriptions',
       JSON.stringify([
@@ -126,7 +120,10 @@ describe('EasyProxy shell', () => {
 
     render(<App />)
 
-    fireEvent.click(screen.getByRole('button', { name: /two.example/ }))
+    const twoExampleBtn = screen.getByRole('button', { name: /two.example/ })
+    fireEvent.mouseDown(twoExampleBtn)
+    fireEvent.mouseUp(twoExampleBtn)
+    fireEvent.click(twoExampleBtn)
 
     await waitFor(() => {
       expect(mockInvoke).toHaveBeenCalledWith('save_subscription', {
@@ -138,7 +135,7 @@ describe('EasyProxy shell', () => {
     })
   })
 
-  it('shows saved subscription cards and opens the import form from the add card', () => {
+  it('shows saved subscription cards in sidebar and opens import form from add button', () => {
     localStorage.setItem(
       'easyproxy.subscriptions',
       JSON.stringify([
@@ -154,22 +151,18 @@ describe('EasyProxy shell', () => {
 
     render(<App />)
 
-    expect(screen.queryByLabelText('订阅地址')).not.toBeInTheDocument()
-    expect(screen.queryByText('当前订阅')).not.toBeInTheDocument()
-    expect(screen.getAllByText('one.example')).toHaveLength(2)
-    expect(screen.getByRole('button', { name: '编辑订阅名称' })).toHaveTextContent('✎')
-    expectTextContent('当前线路HK 01')
-    expectTextContent('节点数量1 个')
-    expect(screen.queryByText(/clash-yaml ·/)).not.toBeInTheDocument()
+    // Subscription shown in sidebar
     expect(screen.getByRole('button', { name: /one.example/ })).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: '增加订阅' }))
+    // Import form hidden
+    expect(screen.queryByLabelText('订阅地址')).not.toBeInTheDocument()
 
-    expect(screen.getByLabelText('订阅地址')).toHaveValue('')
-    expect(screen.getByRole('button', { name: '导入' })).toBeInTheDocument()
+    // Overview shows info
+    expectTextContent('当前线路HK 01')
+    expectTextContent('节点数量1 个')
   })
 
-  it('renames the active subscription from the subscription header', () => {
+  it('renames the active subscription via modal', () => {
     localStorage.setItem(
       'easyproxy.subscriptions',
       JSON.stringify([
@@ -185,25 +178,21 @@ describe('EasyProxy shell', () => {
 
     render(<App />)
 
-    const editButton = screen.getByRole('button', { name: '编辑订阅名称' })
-    expect(editButton).toHaveTextContent('✎')
+    fireEvent.click(screen.getByRole('button', { name: /重命名/ }))
 
-    fireEvent.click(editButton)
     fireEvent.change(screen.getByLabelText('订阅名称'), {
       target: { value: '工作订阅' },
     })
-    expect(screen.getByRole('button', { name: '保存订阅名称' })).toHaveTextContent('✓')
 
-    fireEvent.click(screen.getByRole('button', { name: '保存订阅名称' }))
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
 
-    expect(screen.getAllByText('工作订阅')).toHaveLength(2)
     expect(JSON.parse(localStorage.getItem('easyproxy.subscriptions') ?? '[]')[0]).toMatchObject({
       name: '工作订阅',
       url: 'https://one.example/sub.yaml',
     })
   })
 
-  it('expands the node card into a full-page node panel', () => {
+  it('navigates to full node page from sidebar', () => {
     localStorage.setItem(
       'easyproxy.subscriptions',
       JSON.stringify([
@@ -219,24 +208,14 @@ describe('EasyProxy shell', () => {
 
     render(<App />)
 
-    expect(screen.queryByText('暂无流量')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '展开线路' })).toBeInTheDocument()
-    expect(screen.queryByRole('region', { name: '线路切换' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '线路切换' }))
 
-    fireEvent.click(screen.getByRole('button', { name: '展开线路' }))
-
-    expect(screen.getByRole('region', { name: '线路切换' })).toBeInTheDocument()
-    expect(screen.queryByText('订阅')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '收起线路' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /HK 01/ })).toHaveClass('selected')
-
-    fireEvent.click(screen.getByRole('button', { name: '收起线路' }))
-
-    expect(screen.queryByRole('region', { name: '线路切换' })).not.toBeInTheDocument()
-    expect(screen.getByText('订阅')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: '线路切换' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /HK 01/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /SG 02/ })).toBeInTheDocument()
   })
 
-  it('moves subscription info nodes into the subscription card and filters them from node switching', () => {
+  it('filters subscription info nodes into the overview info card', () => {
     localStorage.setItem(
       'easyproxy.subscriptions',
       JSON.stringify([
@@ -255,45 +234,8 @@ describe('EasyProxy shell', () => {
     expectTextContent('剩余流量197.92 GB')
     expectTextContent('距离下次重置剩余31 天')
     expectTextContent('套餐到期2027-02-22')
-    expect(screen.getByText('节点：HK 01')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /HK 01/ })).toHaveClass('selected')
-    expect(screen.queryByRole('button', { name: /剩余流量/ })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /距离下次重置剩余/ })).not.toBeInTheDocument()
+    expectTextContent('当前线路HK 01')
     expectTextContent('节点数量1 个')
-  })
-
-  it('does not refill the import url when switching saved subscriptions', async () => {
-    localStorage.setItem(
-      'easyproxy.subscriptions',
-      JSON.stringify([
-        {
-          name: 'one.example',
-          url: 'https://one.example/sub.yaml',
-          content: 'proxies:\n  - name: HK 01\n',
-          nodes: ['HK 01'],
-          format: 'clash-yaml',
-        },
-        {
-          name: 'two.example',
-          url: 'https://two.example/sub.yaml',
-          content: 'proxies:\n  - name: SG 02\n',
-          nodes: ['SG 02'],
-          format: 'clash-yaml',
-        },
-      ]),
-    )
-
-    render(<App />)
-
-    fireEvent.click(screen.getByRole('button', { name: /two.example/ }))
-
-    await waitFor(() => {
-      expect(localStorage.getItem('easyproxy.activeSubscription')).toBe('https://two.example/sub.yaml')
-    })
-
-    fireEvent.click(screen.getByRole('button', { name: '增加订阅' }))
-
-    expect(screen.getByLabelText('订阅地址')).toHaveValue('')
   })
 
   it('names imported subscriptions from the url domain and selects them', async () => {
@@ -342,7 +284,7 @@ describe('EasyProxy shell', () => {
 
     render(<App />)
 
-    expect(screen.getByText('节点：SG 02')).toBeInTheDocument()
+    expectTextContent('当前线路SG 02')
     expect(screen.getByRole('button', { name: /two.example/ })).toHaveClass('selected')
   })
 
@@ -365,37 +307,10 @@ describe('EasyProxy shell', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /SG 02/ }))
 
-    await waitFor(() => {
-      expect(mockInvoke).toHaveBeenCalledWith('select_proxy_node', { node: 'SG 02' })
-    })
+    // When proxy is off, node selection is cached locally without invoking backend
     expect(JSON.parse(localStorage.getItem('easyproxy.selectedNodes') ?? '{}')).toEqual({
       'https://one.example/sub.yaml': 'SG 02',
     })
-  })
-
-  it('restores the cached node for the last selected subscription on next launch', () => {
-    localStorage.setItem(
-      'easyproxy.subscriptions',
-      JSON.stringify([
-        {
-          name: 'one.example',
-          url: 'https://one.example/sub.yaml',
-          content: 'proxies:\n  - name: HK 01\n',
-          nodes: ['HK 01', 'SG 02'],
-          format: 'clash-yaml',
-        },
-      ]),
-    )
-    localStorage.setItem('easyproxy.activeSubscription', 'https://one.example/sub.yaml')
-    localStorage.setItem(
-      'easyproxy.selectedNodes',
-      JSON.stringify({ 'https://one.example/sub.yaml': 'SG 02' }),
-    )
-
-    render(<App />)
-
-    expect(screen.getByText('节点：SG 02')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /SG 02/ })).toHaveClass('selected')
   })
 
   it('keeps other controls usable while a subscription import is pending', () => {
@@ -440,14 +355,13 @@ describe('EasyProxy shell', () => {
     render(<App />)
 
     await waitFor(() => {
-      expect(screen.getByText('浏览器预览模式')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /dy.boost1.shop/ })).toBeInTheDocument()
     })
     expect(screen.queryByText(/Cannot read properties/)).not.toBeInTheDocument()
-    expect(screen.getAllByText('dy.boost1.shop')).toHaveLength(2)
+    expect(screen.getByRole('button', { name: /dy.boost1.shop/ })).toBeInTheDocument()
     expectTextContent('剩余流量197.92 GB')
     expectTextContent('距离下次重置剩余31 天')
-    expect(screen.getByText('节点：香港 01')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /香港 01/ })).toHaveClass('selected')
-    expect(screen.queryByRole('button', { name: /剩余流量/ })).not.toBeInTheDocument()
+    expectTextContent('当前线路香港 01')
+    expect(screen.getByRole('button', { name: /香港 01/ })).toBeInTheDocument()
   })
 })

@@ -255,12 +255,11 @@ function SidebarSubscriptionItem({
   })
 
   return (
-    <div className="sidebar-subscription-swipe">
+    <div className="sidebar-subscription-swipe" {...swipeHandlers}>
       <button
         className={`subscription-item ${isSwiped ? 'swiped' : ''} ${isSelected ? 'selected' : ''}`}
         type="button"
         disabled={disabled}
-        {...swipeHandlers}
       >
         <span>{subscription.name}</span>
         <small>{nodeCount} 个</small>
