@@ -9,7 +9,8 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build:service": "cd src-tauri && cargo build --release --bin easyproxy-service && cp target/release/easyproxy-service binaries/"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0",
