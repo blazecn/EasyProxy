@@ -279,6 +279,69 @@ function SubscriptionCard({
   )
 }
 
+interface SidebarSubscriptionItemProps {
+  subscription: SavedSubscription
+  isSwiped: boolean
+  isSelected: boolean
+  onSwipeOpen: () => void
+  onSwipeClose: () => void
+  onSwitch: () => void
+  onDelete: () => void
+  disabled: boolean
+  nodeCount: number
+}
+
+function SidebarSubscriptionItem({
+  subscription,
+  isSwiped,
+  isSelected,
+  onSwipeOpen,
+  onSwipeClose,
+  onSwitch,
+  onDelete,
+  disabled,
+  nodeCount,
+}: SidebarSubscriptionItemProps) {
+  const swipeHandlers = useSwipeable({
+    onSwipedLeft: () => onSwipeOpen(),
+    onSwipedRight: () => onSwipeClose(),
+    onTap: () => {
+      if (isSwiped) {
+        onSwipeClose()
+      } else {
+        onSwitch()
+      }
+    },
+    delta: 60,
+    preventScrollOnSwipe: true,
+    trackMouse: true,
+  })
+
+  return (
+    <div className="sidebar-subscription-swipe">
+      <button
+        className={`subscription-item ${isSwiped ? 'swiped' : ''} ${isSelected ? 'selected' : ''}`}
+        type="button"
+        disabled={disabled}
+        {...swipeHandlers}
+      >
+        <span>{subscription.name}</span>
+        <small>{nodeCount} 个</small>
+      </button>
+      <button
+        className="sidebar-delete-action"
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation()
+          onDelete()
+        }}
+      >
+        <Trash2 size={14} />
+      </button>
+    </div>
+  )
+}
+
 function App() {
   const [initialSubscriptionState] = useState(readInitialSubscriptionState)
   const [enabled, setEnabled] = useState(false)
