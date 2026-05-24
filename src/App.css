@@ -641,3 +641,50 @@
     grid-template-columns: 1fr;
   }
 }
+
+@media (prefers-color-scheme: dark) {
+  .app-shell {
+    background: #1c1c1e;
+  }
+
+  .sidebar {
+    background: rgba(28, 28, 30, 0.78);
+    border-right-color: rgba(255, 255, 255, 0.08);
+  }
+
+  .nav-item { color: #d1d1d6; }
+  .nav-item:hover { background: rgba(255, 255, 255, 0.06); }
+  .nav-item.selected { background: rgba(10, 132, 255, 0.16); color: #0a84ff; }
+
+  .subscription-item { color: #d1d1d6; }
+  .subscription-item:hover { background: rgba(255, 255, 255, 0.06); }
+  .subscription-item.selected { background: rgba(10, 132, 255, 0.12); color: #0a84ff; }
+
+  .sidebar-status { background: rgba(255, 255, 255, 0.04); }
+  .sidebar-status-dot { background: #5a5a5e; }
+  .sidebar-status-text { color: #e5e5e7; }
+
+  .status-bar,
+  .info-card,
+  .node-preview-card {
+    background: #2c2c2e;
+    border-color: rgba(255, 255, 255, 0.06);
+  }
+
+  .toggle-track { background: #5a5a5e; }
+  .toggle-track::after { box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+
+  .content-area h2 { color: #e5e5e7; }
+  .card-label { color: #a1a1a6; }
+  .info-cell-value { color: #e5e5e7; }
+  .info-cell-label { color: #a1a1a6; }
+  .node-preview-item { color: #d1d1d6; }
+
+  .sidebar-section-title button:hover { background: rgba(255, 255, 255, 0.08); }
+
+  .sidebar-import-form input {
+    background: #3a3a3c;
+    border-color: rgba(255, 255, 255, 0.1);
+    color: #e5e5e7;
+  }
+}
