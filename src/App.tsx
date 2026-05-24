@@ -1041,12 +1041,7 @@ function App() {
       <section className="content-area">
         {page === 'overview' && (
           <>
-            <div>
-              <h2>总览</h2>
-              <p className="subtitle">
-                {currentSubscription ? `${currentSubscription.name} 的代理状态` : '等待导入订阅'}
-              </p>
-            </div>
+
 
             <div className="status-bar">
               <strong>127.0.0.1:7890</strong>
@@ -1328,12 +1323,7 @@ function App() {
 
         {page === 'nodes' && (
           <>
-            <div>
-              <h2>线路切换</h2>
-              <p className="subtitle">
-                {groups.length} 个分组 · {proxyNodes.length} 个可用线路
-              </p>
-            </div>
+
             <div className="group-page-list">
               {groups.length > 0 ? (
                 groups.map((group) => (
@@ -1414,12 +1404,7 @@ function App() {
 
         {page === 'rules' && (
           <>
-            <div>
-              <h2>代理规则</h2>
-              <p className="subtitle">
-                {customRules.length} 条自定义 · {rules.length} 条订阅
-              </p>
-            </div>
+
 
             <div className="rules-toolbar">
               <input
@@ -1511,12 +1496,7 @@ function App() {
 
         {page === 'dns' && (
           <>
-            <div>
-              <h2>DNS 覆写</h2>
-              <p className="subtitle">
-                自定义 DNS 配置以覆盖订阅自带的 DNS 设置
-              </p>
-            </div>
+
 
             <div className="dns-toggle-bar">
               <span>启用 DNS 覆写</span>
