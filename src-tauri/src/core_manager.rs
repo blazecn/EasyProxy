@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CoreStatus {
@@ -9,10 +9,11 @@ pub enum CoreStatus {
     Running,
 }
 
+#[derive(Clone)]
 pub struct CoreManager {
     binary_path: PathBuf,
     config_path: PathBuf,
-    child: Mutex<Option<Child>>,
+    child: Arc<Mutex<Option<Child>>>,
 }
 
 impl CoreManager {
@@ -20,7 +21,7 @@ impl CoreManager {
         Self {
             binary_path,
             config_path,
-            child: Mutex::new(None),
+            child: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -64,19 +65,26 @@ impl CoreManager {
             child
                 .kill()
                 .map_err(|error| format!("停止 Mihomo 失败: {error}"))?;
-            let _ = child.wait();
+            let _ = child.try_wait();
         }
 
         Ok(CoreStatus::Stopped)
     }
 
     pub fn status(&self) -> CoreStatus {
-        let Ok(child_guard) = self.child.lock() else {
+        let Ok(mut child_guard) = self.child.lock() else {
             return CoreStatus::Stopped;
         };
 
-        if child_guard.is_some() {
-            CoreStatus::Running
+        if let Some(ref mut child) = *child_guard {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    *child_guard = None;
+                    CoreStatus::Stopped
+                }
+                Ok(None) => CoreStatus::Running,
+                Err(_) => CoreStatus::Stopped,
+            }
         } else {
             CoreStatus::Stopped
         }

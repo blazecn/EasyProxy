@@ -44,8 +44,7 @@ struct ImportedSubscription {
     node_types: std::collections::BTreeMap<String, String>,
 }
 
-#[tauri::command]
-fn core_status(state: State<'_, AppState>) -> Result<AppStatus, String> {
+fn core_status_inner(state: &AppState) -> Result<AppStatus, String> {
     let mode = *state
         .mode
         .lock()
@@ -55,12 +54,22 @@ fn core_status(state: State<'_, AppState>) -> Result<AppStatus, String> {
         .lock()
         .map_err(|_| "读取 TUN 状态失败".to_string())?;
 
+    let system_proxy = if state.proxy.is_enabled() {
+        state.proxy.endpoint()
+    } else {
+        String::new()
+    };
     Ok(AppStatus {
         core: state.core.status(),
         mode,
-        system_proxy: state.proxy.endpoint(),
+        system_proxy,
         tun_enabled,
     })
+}
+
+#[tauri::command]
+fn core_status(state: State<'_, AppState>) -> Result<AppStatus, String> {
+    core_status_inner(&state)
 }
 
 #[tauri::command]
@@ -163,15 +172,38 @@ fn set_proxy_mode(
 }
 
 #[tauri::command]
-fn start_core(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<AppStatus, String> {
-    start_core_inner(&app, &state)?;
-    core_status(state)
+async fn start_core(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<AppStatus, String> {
+    let tun_enabled = *state.tun_enabled.lock().map_err(|_| "读取 TUN 状态失败".to_string())?;
+    start_core_inner_async(
+        tun_enabled,
+        state.core.clone(),
+        state.data_dir.clone(),
+        app.path().resource_dir().map_err(|e| format!("获取资源目录失败: {e}"))?,
+    )
+    .await?;
+    core_status_inner(&state)
 }
 
 #[tauri::command]
-fn stop_core(state: State<'_, AppState>) -> Result<AppStatus, String> {
-    stop_core_inner(&state)?;
-    core_status(state)
+async fn stop_core(state: State<'_, AppState>) -> Result<AppStatus, String> {
+    let tun_enabled = *state.tun_enabled.lock().map_err(|_| "读取 TUN 状态失败".to_string())?;
+    stop_core_inner_async(tun_enabled, state.core.clone()).await?;
+    core_status_inner(&state)
+}
+
+#[tauri::command]
+async fn set_system_proxy(state: State<'_, AppState>, enable: bool) -> Result<AppStatus, String> {
+    let proxy = state.proxy.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if enable {
+            proxy.enable()
+        } else {
+            proxy.disable()
+        }
+    })
+    .await
+    .map_err(|e| format!("系统代理操作失败: {e}"))??;
+    core_status_inner(&state)
 }
 
 #[tauri::command]
@@ -212,56 +244,85 @@ fn default_core_manager(app: &tauri::AppHandle) -> Result<CoreManager, String> {
     Ok(CoreManager::new(binary_path, data_dir.join("mihomo.yaml")))
 }
 
-fn stop_core_inner(state: &AppState) -> Result<(), String> {
-    let tun_enabled = *state
-        .tun_enabled
-        .lock()
-        .map_err(|_| "读取 TUN 状态失败".to_string())?;
+fn ensure_mmdb(data_dir: &std::path::Path) -> Result<(), String> {
+    let mmdb_path = data_dir.join("geoip.metadb");
+    if mmdb_path.exists() {
+        return Ok(());
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let src = std::path::PathBuf::from(home).join(".config/mihomo/geoip.metadb");
+        if src.exists() {
+            std::fs::copy(&src, &mmdb_path)
+                .map_err(|e| format!("复制 MMDB 文件失败: {e}"))?;
+            return Ok(());
+        }
+    }
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
+    let resp = client
+        .get("https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb")
+        .send()
+        .map_err(|e| format!("下载 MMDB 失败: {e}"))?;
+    let bytes = resp.bytes().map_err(|e| format!("读取 MMDB 响应失败: {e}"))?;
+    std::fs::write(&mmdb_path, &bytes).map_err(|e| format!("写入 MMDB 文件失败: {e}"))?;
+    Ok(())
+}
+
+async fn stop_core_inner_async(tun_enabled: bool, core: CoreManager) -> Result<(), String> {
     if tun_enabled {
-        let mut stream = ipc::connect()?;
-        let msg = ipc::IpcMessage::new("stop", None);
-        ipc::send_message(&mut stream, &msg)?;
-        let _resp = ipc::recv_message(&mut stream)?;
+        tauri::async_runtime::spawn_blocking(|| {
+            let mut stream = ipc::connect()?;
+            let msg = ipc::IpcMessage::new("stop", None);
+            ipc::send_message(&mut stream, &msg)?;
+            ipc::recv_message(&mut stream)?;
+            Ok::<_, String>(())
+        })
+        .await
+        .map_err(|e| format!("停止 TUN 内核失败: {e}"))??;
     } else {
-        let _ = state.proxy.disable();
-        state.core.stop()?;
+        core.stop()?;
     }
     Ok(())
 }
 
-fn start_core_inner(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
-    let tun_enabled = *state
-        .tun_enabled
-        .lock()
-        .map_err(|_| "读取 TUN 状态失败".to_string())?;
+async fn start_core_inner_async(
+    tun_enabled: bool,
+    core: CoreManager,
+    data_dir: PathBuf,
+    resource_dir: PathBuf,
+) -> Result<(), String> {
     if tun_enabled {
-        let binary_path = app
-            .path()
-            .resource_dir()
-            .map_err(|e| format!("获取资源目录失败: {e}"))?
-            .join("binaries")
-            .join("mihomo");
-        let config_path = state.data_dir.join("mihomo.yaml");
+        let data_dir_clone = data_dir.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            ensure_mmdb(&data_dir_clone)?;
+            let binary_path = resource_dir.join("binaries").join("mihomo");
+            let config_path = data_dir_clone.join("mihomo.yaml");
 
-        let mut stream = ipc::connect()?;
-        let msg = ipc::IpcMessage::new(
-            "start",
-            Some(serde_json::json!({
-                "binary_path": binary_path.to_str().unwrap_or(""),
-                "config_path": config_path.to_str().unwrap_or(""),
-            })),
-        );
-        ipc::send_message(&mut stream, &msg)?;
-        let _resp = ipc::recv_message(&mut stream)?;
+            let mut stream = ipc::connect()?;
+            let msg = ipc::IpcMessage::new(
+                "start",
+                Some(serde_json::json!({
+                    "binary_path": binary_path.to_str().unwrap_or(""),
+                    "config_path": config_path.to_str().unwrap_or(""),
+                    "working_dir": data_dir_clone.to_str().unwrap_or(""),
+                })),
+            );
+            ipc::send_message(&mut stream, &msg)?;
+            ipc::recv_message(&mut stream)?;
+            Ok::<_, String>(())
+        })
+        .await
+        .map_err(|e| format!("启动 TUN 内核失败: {e}"))??;
     } else {
-        state.core.start()?;
-        let _ = state.proxy.enable();
+        core.start()?;
     }
     Ok(())
 }
 
 #[tauri::command]
-fn set_tun_mode(
+async fn set_tun_mode(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     enabled: bool,
@@ -277,12 +338,22 @@ fn set_tun_mode(
             .map_err(|e| format!("获取资源目录失败: {e}"))?
             .join("binaries")
             .join("easyproxy-service");
-        service_manager::install(service_bin.to_str().unwrap_or(""))?;
+        let bin_path = service_bin.to_str().unwrap_or("").to_string();
+        if service_manager::needs_update(&bin_path) {
+            tauri::async_runtime::spawn_blocking(move || service_manager::install(&bin_path))
+                .await
+                .map_err(|e| format!("安装服务失败: {e}"))??;
+        }
     }
 
-    let was_running = state.core.status() == CoreStatus::Running;
+    let tun_was_running = *state
+        .tun_enabled
+        .lock()
+        .map_err(|_| "读取 TUN 状态失败".to_string())?;
+    let direct_was_running = state.core.status() == CoreStatus::Running;
+    let was_running = tun_was_running || direct_was_running;
     if was_running {
-        stop_core_inner(&state)?;
+        stop_core_inner_async(tun_was_running, state.core.clone()).await?;
     }
 
     *state
@@ -290,29 +361,40 @@ fn set_tun_mode(
         .lock()
         .map_err(|_| "保存 TUN 状态失败".to_string())? = enabled;
 
-    if let Some(sub) = state
+    let data_dir = state.data_dir.clone();
+    let subscription = state
         .subscription
         .lock()
         .map_err(|_| "读取订阅失败".to_string())?
-        .as_ref()
-    {
-        write_runtime_config(
-            &state.data_dir.join("mihomo.yaml"),
-            sub,
-            state
-                .mode
-                .lock()
-                .map_err(|_| "读取模式失败".to_string())?
-                .as_mihomo_mode(),
+        .clone();
+    let mode = *state
+        .mode
+        .lock()
+        .map_err(|_| "读取模式失败".to_string())?;
+
+    if let Some(ref sub) = subscription {
+        let config_path = data_dir.join("mihomo.yaml");
+        let sub = sub.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            write_runtime_config(&config_path, &sub, mode.as_mihomo_mode(), enabled)
+        })
+        .await
+        .map_err(|e| format!("写入配置失败: {e}"))??;
+    }
+
+    if enabled || direct_was_running {
+        start_core_inner_async(
             enabled,
-        )?;
+            state.core.clone(),
+            state.data_dir.clone(),
+            app.path()
+                .resource_dir()
+                .map_err(|e| format!("获取资源目录失败: {e}"))?,
+        )
+        .await?;
     }
 
-    if was_running {
-        start_core_inner(&app, &state)?;
-    }
-
-    core_status(state)
+    core_status_inner(&state)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -337,6 +419,11 @@ pub fn run() {
                         .build(),
                 )?;
             }
+            // Auto-start core on launch (non-TUN mode)
+            let state = app.state::<AppState>();
+            if let Err(e) = state.core.start() {
+                log::warn!("自动启动 Mihomo 内核失败: {e}");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -345,6 +432,7 @@ pub fn run() {
             refresh_subscription,
             select_proxy_node,
             set_proxy_mode,
+            set_system_proxy,
             set_tun_mode,
             start_core,
             stop_core,

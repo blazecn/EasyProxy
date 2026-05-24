@@ -376,7 +376,7 @@ function App() {
     invoke<AppStatus>('core_status')
       .then((status) => {
         if (!mounted) return
-        setEnabled(status.core === 'Running')
+        setEnabled(status.system_proxy !== '')
         setProxyMode(status.mode)
         setTunEnabled(status.tun_enabled)
       })
@@ -404,19 +404,14 @@ function App() {
   async function toggleProxy() {
     const nextEnabled = !enabled
     setEnabled(nextEnabled)
-    setMessage(nextEnabled ? '正在启动 Mihomo 内核并设置系统代理' : '正在关闭系统代理')
-    setBusyAction('proxy')
 
     try {
-      const status = await invoke<AppStatus>(nextEnabled ? 'start_core' : 'stop_core')
-      setEnabled(status.core === 'Running')
+      const status = await invoke<AppStatus>('set_system_proxy', { enable: nextEnabled })
+      setEnabled(status.system_proxy !== '')
       setProxyMode(status.mode)
-      setMessage(nextEnabled ? '代理已启动' : '代理已停止')
     } catch (error) {
       setEnabled(!nextEnabled)
       setMessage(displayError(error))
-    } finally {
-      setBusyAction(null)
     }
   }
 
@@ -573,7 +568,7 @@ function App() {
 
     try {
       const status = await invoke<AppStatus>('set_proxy_mode', { mode })
-      setEnabled(status.core === 'Running')
+      setEnabled(status.system_proxy !== '')
       setProxyMode(status.mode)
     } catch (error) {
       setProxyMode(previousMode)
@@ -638,20 +633,15 @@ function App() {
   async function toggleTunMode() {
     const nextEnabled = !tunEnabled
     setTunEnabled(nextEnabled)
-    setMessage(nextEnabled ? '正在安装并开启 TUN 模式...' : '正在关闭 TUN 模式...')
-    setBusyAction('tun')
 
     try {
       const status = await invoke<AppStatus>('set_tun_mode', { enabled: nextEnabled })
       setTunEnabled(status.tun_enabled)
-      setEnabled(status.core === 'Running')
+      setEnabled(status.system_proxy !== '')
       setProxyMode(status.mode)
-      setMessage(nextEnabled ? 'TUN 模式已开启' : 'TUN 模式已关闭')
     } catch (error) {
       setTunEnabled(!nextEnabled)
       setMessage(displayError(error))
-    } finally {
-      setBusyAction(null)
     }
   }
 
@@ -753,7 +743,6 @@ function App() {
             aria-checked={enabled}
             aria-label="系统代理"
             onClick={toggleProxy}
-            disabled={busyAction === 'proxy'}
           >
             <span>系统代理</span>
             <span className="toggle-track" aria-hidden="true" />
@@ -765,7 +754,6 @@ function App() {
             aria-checked={tunEnabled}
             aria-label="TUN 模式"
             onClick={toggleTunMode}
-            disabled={busyAction === 'tun' || busyAction === 'proxy'}
           >
             <span>TUN 模式</span>
             <span className="toggle-track" aria-hidden="true" />

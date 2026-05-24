@@ -9,6 +9,30 @@ pub fn is_installed() -> bool {
     std::path::Path::new(PLIST_PATH).exists()
 }
 
+pub fn needs_update(bundled_binary: &str) -> bool {
+    let dest = format!("{}/{}", INSTALL_DIR, SERVICE_BIN_NAME);
+    if !std::path::Path::new(&dest).exists() || !std::path::Path::new(PLIST_PATH).exists() {
+        return true;
+    }
+    // Compare file contents
+    let bundled_md5 = md5_of_file(bundled_binary);
+    let deployed_md5 = md5_of_file(&dest);
+    bundled_md5 != deployed_md5 || bundled_md5.is_none()
+}
+
+fn md5_of_file(path: &str) -> Option<String> {
+    let output = Command::new("md5")
+        .arg("-q")
+        .arg(path)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
 pub fn install(binary_path: &str) -> Result<(), String> {
     let install_dir = INSTALL_DIR;
     let dest = &format!("{}/{}", install_dir, SERVICE_BIN_NAME);

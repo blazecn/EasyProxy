@@ -36,6 +36,10 @@ impl SystemProxy {
         format!("{}:{}", self.host, self.port)
     }
 
+    pub fn is_enabled(&self) -> bool {
+        is_platform_proxy_enabled()
+    }
+
     pub fn enable(&self) -> Result<(), String> {
         enable_platform_proxy(&self.host, self.port)
     }
@@ -43,6 +47,25 @@ impl SystemProxy {
     pub fn disable(&self) -> Result<(), String> {
         disable_platform_proxy()
     }
+}
+
+#[cfg(target_os = "macos")]
+fn is_platform_proxy_enabled() -> bool {
+    network_services()
+        .ok()
+        .and_then(|services| services.into_iter().next())
+        .map(|service| {
+            Command::new("networksetup")
+                .args(["-getwebproxy", &service])
+                .output()
+                .ok()
+                .map(|output| {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    stdout.lines().any(|line| line.trim() == "Enabled: Yes")
+                })
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(target_os = "macos")]
@@ -73,7 +96,7 @@ fn disable_platform_proxy() -> Result<(), String> {
 #[cfg(target_os = "macos")]
 fn network_services() -> Result<Vec<String>, String> {
     let output = Command::new("networksetup")
-        .arg("-listallnetworkservices")
+        .arg("-listnetworkserviceorder")
         .output()
         .map_err(|error| format!("读取 macOS 网络服务失败: {error}"))?;
 
@@ -83,10 +106,18 @@ fn network_services() -> Result<Vec<String>, String> {
 
     let services = String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter(|line| !line.starts_with("An asterisk"))
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            // Lines with service name start with "(N) " pattern
+            if trimmed.starts_with('(') {
+                trimmed.splitn(2, ')')
+                    .nth(1)
+                    .map(|s| s.trim().to_string())
+            } else {
+                None
+            }
+        })
+        .filter(|s| !s.is_empty())
         .collect::<Vec<_>>();
 
     Ok(services)
@@ -157,6 +188,11 @@ fn set_windows_proxy_enabled(enabled: bool) -> Result<(), String> {
     } else {
         Err("更新 Windows 系统代理失败".to_string())
     }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn is_platform_proxy_enabled() -> bool {
+    false
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
