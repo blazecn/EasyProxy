@@ -1,4 +1,5 @@
 use app_lib::ipc;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -12,6 +13,12 @@ fn main() {
 
     let listener = UnixListener::bind(ipc::SOCKET_PATH)
         .expect("绑定 IPC socket 失败 (需要 root)");
+
+    std::fs::set_permissions(
+        ipc::SOCKET_PATH,
+        std::fs::Permissions::from_mode(0o666),
+    )
+    .ok();
 
     let state = ServiceState {
         child: Mutex::new(None),

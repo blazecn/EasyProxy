@@ -43,7 +43,8 @@ pub fn install(binary_path: &str) -> Result<(), String> {
         .replace("`", "\\`");
 
     let script = format!(
-        r#"do shell script "mkdir -p {install_dir} && cp {src} {dest} && chmod 755 {dest}
+        r#"do shell script "launchctl unload {plist_path} 2>/dev/null
+mkdir -p {install_dir} && cp {src} {dest} && chmod 755 {dest}
 cat > {plist_path} << 'PLIST_EOF'
 {content}
 PLIST_EOF

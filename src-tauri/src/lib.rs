@@ -270,7 +270,7 @@ fn set_tun_mode(
         return Err("TUN 模式当前仅支持 macOS".to_string());
     }
 
-    if enabled && !service_manager::is_installed() {
+    if enabled {
         let service_bin = app
             .path()
             .resource_dir()
