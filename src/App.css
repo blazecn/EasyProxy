@@ -135,12 +135,12 @@
   border-radius: 6px;
 }
 
-.sidebar-subscription-swipe .swipe-target {
+.sidebar-subscription-swipe .subscription-item {
   transform: translateX(0);
   transition: transform 180ms ease;
 }
 
-.sidebar-subscription-swipe .swipe-target.swiped {
+.sidebar-subscription-swipe .subscription-item.swiped {
   transform: translateX(-64px);
 }
 
