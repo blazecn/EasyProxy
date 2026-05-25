@@ -27,7 +27,8 @@
     "active": true,
     "targets": "all",
     "resources": [
-      "binaries/*"
+      "binaries/*",
+      "icons/tray-icon.png"
     ],
     "icon": [
       "icons/32x32.png",
