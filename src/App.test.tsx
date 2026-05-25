@@ -120,6 +120,7 @@ describe('EasyProxy shell', () => {
     // Sidebar navigation
     expect(screen.getByRole('button', { name: '总览' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '线路切换' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '连接' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '代理规则' })).toBeInTheDocument()
 
     // Sidebar switches at bottom
@@ -243,6 +244,74 @@ describe('EasyProxy shell', () => {
 
     expect(screen.getByRole('button', { name: /HK 01/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /SG 02/ })).toBeInTheDocument()
+  })
+
+  it('shows preview connections and expands details', async () => {
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '连接' })).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: '连接' }))
+
+    expect(await screen.findByText('youtube.com')).toBeInTheDocument()
+    expect(screen.getByText(/Chrome · TCP · DOMAIN-SUFFIX/)).toBeInTheDocument()
+    expect(screen.getByText('香港 01')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('youtube.com'))
+
+    expect(screen.getByText('源地址')).toBeInTheDocument()
+    expect(screen.getByText('127.0.0.1:51842')).toBeInTheDocument()
+    expect(screen.getByText('preview-youtube')).toBeInTheDocument()
+  })
+
+  it('filters connections by search and protocol', async () => {
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '连接' })).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByRole('button', { name: '连接' }))
+
+    expect(await screen.findByText('youtube.com')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('搜索连接'), {
+      target: { value: 'openai' },
+    })
+
+    expect(screen.getByText('api.openai.com')).toBeInTheDocument()
+    expect(screen.queryByText('youtube.com')).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('搜索连接'), {
+      target: { value: '' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'UDP' }))
+
+    expect(screen.getByText('未找到匹配的连接')).toBeInTheDocument()
+  })
+
+  it('invokes connection close commands', async () => {
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '连接' })).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByRole('button', { name: '连接' }))
+
+    expect(await screen.findByText('youtube.com')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /断开 youtube\.com/ }))
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('close_connection', { id: 'preview-youtube' })
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: '全部断开' }))
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('close_all_connections')
+    })
   })
 
   it('filters subscription info nodes into the overview info card', async () => {

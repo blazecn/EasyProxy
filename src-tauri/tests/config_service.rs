@@ -30,6 +30,28 @@ rules:
   - MATCH,Proxy
 "#;
 
+const SUBSCRIPTION_WITH_TUN: &str = r#"
+mixed-port: 7890
+tun:
+  enable: true
+  stack: system
+  auto-route: true
+proxies:
+  - name: HK 01
+    type: ss
+    server: hk.example.com
+    port: 8388
+    cipher: aes-128-gcm
+    password: secret
+proxy-groups:
+  - name: Proxy
+    type: select
+    proxies:
+      - HK 01
+rules:
+  - MATCH,Proxy
+"#;
+
 #[test]
 fn parse_subscription_returns_node_names() {
     let parsed = parse_subscription(SAMPLE_SUBSCRIPTION).expect("subscription should parse");
@@ -39,7 +61,8 @@ fn parse_subscription_returns_node_names() {
 
 #[test]
 fn build_mihomo_config_sets_ports_mode_and_controller() {
-    let config = build_mihomo_config(SAMPLE_SUBSCRIPTION, "rule", false, None, &[]).expect("config should build");
+    let config = build_mihomo_config(SAMPLE_SUBSCRIPTION, "rule", false, None, &[])
+        .expect("config should build");
 
     assert!(config.contains("mixed-port: 7897"));
     assert!(config.contains("external-controller: 127.0.0.1:9090"));
@@ -57,7 +80,8 @@ fn parse_subscription_accepts_base64_anytls_uri_lists() {
 
 #[test]
 fn build_mihomo_config_converts_anytls_uri_to_proxy_yaml() {
-    let config = build_mihomo_config(ANYTLS_URI_SUBSCRIPTION, "rule", false, None, &[]).expect("config should build");
+    let config = build_mihomo_config(ANYTLS_URI_SUBSCRIPTION, "rule", false, None, &[])
+        .expect("config should build");
 
     assert!(config.contains("type: anytls"));
     assert!(config.contains("name: Edge 01"));
@@ -87,7 +111,8 @@ fn uri_subscription_preserves_provider_info_nodes() {
 
 #[test]
 fn generated_proxy_group_preserves_provider_info_nodes() {
-    let config = build_mihomo_config(ANYTLS_WITH_INFO_LINES, "rule", false, None, &[]).expect("config should build");
+    let config = build_mihomo_config(ANYTLS_WITH_INFO_LINES, "rule", false, None, &[])
+        .expect("config should build");
 
     assert!(config.contains("剩余流量"));
     assert!(config.contains("套餐到期"));
@@ -97,7 +122,8 @@ fn generated_proxy_group_preserves_provider_info_nodes() {
 
 #[test]
 fn build_mihomo_config_with_tun_adds_tun_section() {
-    let config = build_mihomo_config(SAMPLE_SUBSCRIPTION, "rule", true, None, &[]).expect("config should build");
+    let config = build_mihomo_config(SAMPLE_SUBSCRIPTION, "rule", true, None, &[])
+        .expect("config should build");
 
     assert!(config.contains("tun:"));
     assert!(config.contains("enable: true"));
@@ -110,7 +136,8 @@ fn build_mihomo_config_with_tun_adds_tun_section() {
 
 #[test]
 fn build_mihomo_config_without_tun_omits_tun_section() {
-    let config = build_mihomo_config(SAMPLE_SUBSCRIPTION, "rule", false, None, &[]).expect("config should build");
+    let config = build_mihomo_config(SAMPLE_SUBSCRIPTION, "rule", false, None, &[])
+        .expect("config should build");
 
     assert!(!config.contains("tun:"));
     assert!(!config.contains("enable: true"));
@@ -120,8 +147,19 @@ fn build_mihomo_config_without_tun_omits_tun_section() {
 }
 
 #[test]
+fn build_mihomo_config_without_tun_removes_subscription_tun_section() {
+    let config = build_mihomo_config(SUBSCRIPTION_WITH_TUN, "rule", false, None, &[])
+        .expect("config should build");
+
+    assert!(!config.contains("tun:"));
+    assert!(!config.contains("auto-route: true"));
+    assert!(config.contains("mixed-port: 7897"));
+}
+
+#[test]
 fn build_mihomo_config_tun_with_anytls_uri() {
-    let config = build_mihomo_config(ANYTLS_URI_SUBSCRIPTION, "global", true, None, &[]).expect("config should build");
+    let config = build_mihomo_config(ANYTLS_URI_SUBSCRIPTION, "global", true, None, &[])
+        .expect("config should build");
 
     assert!(config.contains("type: anytls"));
     assert!(config.contains("tun:"));
@@ -132,7 +170,9 @@ fn build_mihomo_config_tun_with_anytls_uri() {
 #[test]
 fn dns_override_enabled_injects_dns_section() {
     let content = "proxies:\n  - name: Test\n    type: ss\n    server: 1.2.3.4\n    port: 8388\n    password: pwd\n    cipher: aes-256-gcm\n";
-    let dns_config: serde_yaml::Value = serde_yaml::from_str("enable: true\nlisten: 0.0.0.0:53\nnameserver:\n  - 223.5.5.5\n").unwrap();
+    let dns_config: serde_yaml::Value =
+        serde_yaml::from_str("enable: true\nlisten: 0.0.0.0:53\nnameserver:\n  - 223.5.5.5\n")
+            .unwrap();
     let dns_override = DnsOverride {
         enabled: true,
         config: dns_config,
@@ -149,7 +189,8 @@ fn dns_override_enabled_injects_dns_section() {
 #[test]
 fn dns_override_disabled_does_not_inject_dns_section() {
     let content = "proxies:\n  - name: Test\n    type: ss\n    server: 1.2.3.4\n    port: 8388\n    password: pwd\n    cipher: aes-256-gcm\n";
-    let dns_config: serde_yaml::Value = serde_yaml::from_str("enable: true\nlisten: 0.0.0.0:53\n").unwrap();
+    let dns_config: serde_yaml::Value =
+        serde_yaml::from_str("enable: true\nlisten: 0.0.0.0:53\n").unwrap();
     let dns_override = DnsOverride {
         enabled: false,
         config: dns_config,
