@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { Pencil, Trash2, Layout, Share2, List, ChevronDown, Globe } from 'lucide-react'
+import { listen } from '@tauri-apps/api/event'
+import { Pencil, Trash2, Layout, Share2, List, ChevronDown, Globe, Settings } from 'lucide-react'
 import './App.css'
 
 type CoreStatus = 'Stopped' | 'Running'
 type BackendProxyMode = 'Rule' | 'Global' | 'Direct'
-type Page = 'overview' | 'nodes' | 'rules' | 'dns'
+type Page = 'overview' | 'nodes' | 'rules' | 'dns' | 'settings'
 
 const proxyModeOptions: Array<{ value: BackendProxyMode; label: string }> = [
   { value: 'Rule', label: '规则模式' },
@@ -259,6 +260,7 @@ function SidebarSubscriptionItem({
 function App() {
   const [enabled, setEnabled] = useState(false)
   const [tunEnabled, setTunEnabled] = useState(false)
+  const [autostartEnabled, setAutostartEnabled] = useState(false)
   const [subscriptionUrl, setSubscriptionUrl] = useState('')
   const [savedSubscriptions, setSavedSubscriptions] = useState<SavedSubscription[]>([])
   const [activeSubscription, setActiveSubscription] = useState('')
@@ -283,6 +285,7 @@ function App() {
   const [newRuleTarget, setNewRuleTarget] = useState<'Proxy' | 'DIRECT' | 'REJECT'>('Proxy')
   const [page, setPage] = useState<Page>('overview')
   const [overviewTab, setOverviewTab] = useState<'info' | 'nodes'>('info')
+  const hasRestored = useRef(false)
 
   interface DnsOverrideConfig {
     enable?: boolean
@@ -322,6 +325,7 @@ function App() {
   const [dnsYaml, setDnsYaml] = useState('')
   const [dnsYamlError, setDnsYamlError] = useState('')
   const [dnsDirty, setDnsDirty] = useState(false)
+  const [dnsSaveFeedback, setDnsSaveFeedback] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
 
   const statusText = enabled ? '已连接' : '未连接'
   const currentSubscription = savedSubscriptions.find((item) => item.url === activeSubscription)
@@ -437,10 +441,46 @@ function App() {
         setMessage(displayError(error))
       })
 
+    invoke<boolean>('get_autostart')
+      .then((v) => { if (mounted) setAutostartEnabled(v) })
+      .catch(() => {})
+
     return () => {
       mounted = false
     }
   }, [])
+
+  // Listen for system proxy changes from tray menu
+  useEffect(() => {
+    const unlisten = listen<boolean>('system-proxy-changed', (event) => {
+      setEnabled(event.payload)
+    })
+    return () => {
+      unlisten.then((fn) => fn())
+    }
+  }, [])
+
+  // Listen for proxy mode changes from tray menu
+  useEffect(() => {
+    const unlisten = listen<BackendProxyMode>('proxy-mode-changed', (event) => {
+      setProxyMode(event.payload)
+    })
+    return () => {
+      unlisten.then((fn) => fn())
+    }
+  }, [])
+
+  // Restore saved node selections to Mihomo core on startup
+  useEffect(() => {
+    if (!enabled || hasRestored.current) return
+    if (Object.keys(selectedNodes).length === 0 || groups.length === 0) return
+
+    hasRestored.current = true
+    const entries = Object.entries(selectedNodes)
+    entries.forEach(([group, node]) => {
+      invoke('select_proxy_node', { group, node }).catch(() => {})
+    })
+  }, [enabled, selectedNodes, groups])
 
   async function toggleProxy() {
     const nextEnabled = !enabled
@@ -486,6 +526,7 @@ function App() {
       setNodes(summary.nodes)
       setNodeTypes(summary.node_types)
       setSelectedNodes(nextSelections)
+      hasRestored.current = false
       setRules(summary.rules)
       setGroups(summary.groups)
       setActiveSubscription(nextUrl)
@@ -522,6 +563,7 @@ function App() {
       setNodes(summary.nodes)
       setNodeTypes(summary.node_types)
       setSelectedNodes(nextSelections)
+      hasRestored.current = false
       setRules(summary.rules)
       setGroups(summary.groups)
       setSavedSubscriptions((current) => {
@@ -832,8 +874,9 @@ function App() {
     }
 
     const data: DnsOverrideData = { enabled: dnsOverride.enabled, config }
+    setDnsSaveFeedback(null)
     try {
-      const status = await invoke<AppStatus>('set_dns_override', data as unknown as Record<string, unknown>)
+      const status = await invoke<AppStatus>('set_dns_override', { dnsOverride: data })
       setDnsOverride(data)
       setDnsForm(config)
       setDnsYaml(formToYaml(config))
@@ -843,8 +886,11 @@ function App() {
       setProxyMode(status.mode)
       setTunEnabled(status.tun_enabled)
       setMessage('DNS 覆写配置已保存')
+      setDnsSaveFeedback({ kind: 'ok', text: 'DNS 覆写配置已保存' })
     } catch (error) {
-      setMessage(displayError(error))
+      const text = displayError(error)
+      setMessage(text)
+      setDnsSaveFeedback({ kind: 'err', text })
     }
   }
 
@@ -858,8 +904,6 @@ function App() {
     <main className="app-shell">
       {/* === Sidebar === */}
       <aside className="sidebar">
-        <div className="sidebar-section-title">EasyProxy</div>
-
         <button
           className={`nav-item ${page === 'overview' ? 'selected' : ''}`}
           type="button"
@@ -899,6 +943,16 @@ function App() {
             <Globe size={16} />
           </span>
           DNS
+        </button>
+        <button
+          className={`nav-item ${page === 'settings' ? 'selected' : ''}`}
+          type="button"
+          onClick={() => setPage('settings')}
+        >
+          <span className="nav-icon">
+            <Settings size={16} />
+          </span>
+          设置
         </button>
 
         <div className="sidebar-section-title">
@@ -950,7 +1004,7 @@ function App() {
             <span className="sidebar-status-text">{statusText}</span>
           </div>
           <div className="sidebar-status-detail">
-            {statusNode} · {proxyModeOptions.find((m) => m.value === proxyMode)?.label ?? proxyMode}
+            {nodeIcon(statusNode) ? `${nodeIcon(statusNode)} ${stripLeadingFlags(statusNode)}` : statusNode} · {proxyModeOptions.find((m) => m.value === proxyMode)?.label ?? proxyMode}
           </div>
         </div>
 
@@ -987,7 +1041,7 @@ function App() {
 
 
             <div className="status-bar">
-              <strong>127.0.0.1:7890</strong>
+              <strong>127.0.0.1:7897</strong>
               <span className="status-bar-sep">·</span>
               <span>{statusText}</span>
               {currentSubscription && (
@@ -1036,17 +1090,11 @@ function App() {
                       })}
                       <div className="info-cell">
                         <span className="info-cell-label">当前线路</span>
-                        <span className="info-cell-value accent">{statusNode}</span>
+                        <span className="info-cell-value accent">{nodeIcon(statusNode) ? `${nodeIcon(statusNode)} ${stripLeadingFlags(statusNode)}` : statusNode}</span>
                       </div>
                       <div className="info-cell">
                         <span className="info-cell-label">节点数量</span>
                         <span className="info-cell-value">{proxyNodes.length} 个</span>
-                      </div>
-                      <div className="info-cell">
-                        <span className="info-cell-label">代理模式</span>
-                        <span className="info-cell-value">
-                          {proxyModeOptions.find((m) => m.value === proxyMode)?.label ?? proxyMode}
-                        </span>
                       </div>
                     </div>
                     <div className="info-card-modes">
@@ -1148,17 +1196,11 @@ function App() {
                         })}
                         <div className="info-cell">
                           <span className="info-cell-label">当前线路</span>
-                          <span className="info-cell-value accent">{statusNode}</span>
+                          <span className="info-cell-value accent">{nodeIcon(statusNode) ? `${nodeIcon(statusNode)} ${stripLeadingFlags(statusNode)}` : statusNode}</span>
                         </div>
                         <div className="info-cell">
                           <span className="info-cell-label">节点数量</span>
                           <span className="info-cell-value">{proxyNodes.length} 个</span>
-                        </div>
-                        <div className="info-cell">
-                          <span className="info-cell-label">代理模式</span>
-                          <span className="info-cell-value">
-                            {proxyModeOptions.find((m) => m.value === proxyMode)?.label ?? proxyMode}
-                          </span>
                         </div>
                       </div>
                       <div className="info-card-modes">
@@ -1491,6 +1533,12 @@ function App() {
                 {/* --- 基础设置 --- */}
                 <fieldset className="dns-fieldset">
                   <legend className="dns-legend">基础设置</legend>
+                  <p className="dns-field-hint">
+                    <strong>DNS 功能</strong>：开关 mihomo 内置 DNS；关闭则下面所有项都不生效。<br />
+                    <strong>监听地址</strong>：mihomo 对外提供 DNS 服务的地址。TUN 模式下系统流量会被劫持到这里；普通模式下保持默认即可，无需手动改系统 DNS。<br />
+                    <strong>解析模式</strong>：<code>fake-ip</code> 给域名分配虚拟 IP（速度快、TUN 必备），<code>redir-host</code> 真实解析后透传（兼容性好、IP 类规则才会命中）。<br />
+                    <strong>IPv6</strong>：是否解析 AAAA 记录。线路无 IPv6 时建议关闭，避免连接超时再回退。
+                  </p>
 
                   <label className="dns-field">
                     <span>DNS 功能</span>
@@ -1550,6 +1598,11 @@ function App() {
                 {/* --- DNS 服务器 --- */}
                 <fieldset className="dns-fieldset">
                   <legend className="dns-legend">DNS 服务器</legend>
+                  <p className="dns-field-hint">
+                    <strong>引导 DNS</strong>：只用来解析下面"主 DNS / 回退 DNS"中写的域名形式服务器（如 <code>https://dns.alidns.com/dns-query</code>）。<u>必须填纯 IP</u>，例如 <code>223.5.5.5</code>。<br />
+                    <strong>主 DNS</strong>：日常解析使用的服务器。默认所有域名都走这里。<br />
+                    <strong>回退 DNS</strong>：用于解析国外/被污染域名。需配合下方"Fallback 过滤"决定何时启用——常用做法：主 DNS 用国内 DNS，回退 DNS 用 Cloudflare / Google。
+                  </p>
 
                   {(['default-nameserver', 'nameserver', 'fallback'] as const).map((key) => (
                     <div key={key} className="dns-field dns-list-field">
@@ -1602,6 +1655,10 @@ function App() {
                 {/* --- 域名策略 --- */}
                 <fieldset className="dns-fieldset">
                   <legend className="dns-legend">域名策略 (nameserver-policy)</legend>
+                  <p className="dns-field-hint">
+                    为指定域名单独指派 DNS 服务器，优先级高于主 DNS / 回退 DNS。常见用途：让公司内网域名走内部 DNS。<br />
+                    匹配子域名请使用 <code>+.</code> 前缀——例如 <code>+.example.com</code> 才能覆盖 <code>cf.example.com</code> 等子域；不带前缀只匹配域名本身。
+                  </p>
                   {(dnsForm['nameserver-policy'] ? Object.entries(dnsForm['nameserver-policy']) : []).map(([domain, server], idx) => (
                     <div key={idx} className="dns-list-row">
                       <input
@@ -1670,6 +1727,9 @@ function App() {
                 {/* --- Hosts 映射 --- */}
                 <fieldset className="dns-fieldset">
                   <legend className="dns-legend">Hosts 映射</legend>
+                  <p className="dns-field-hint">
+                    把域名直接指向固定 IP，跳过 DNS 查询，等同于系统的 <code>/etc/hosts</code>。键同样支持 <code>+.</code> 前缀匹配子域名。
+                  </p>
                   {(dnsForm.hosts ? Object.entries(dnsForm.hosts) : []).map(([domain, ip], idx) => (
                     <div key={idx} className="dns-list-row">
                       <input
@@ -1738,6 +1798,12 @@ function App() {
                 {/* --- Fallback 过滤 --- */}
                 <fieldset className="dns-fieldset">
                   <legend className="dns-legend">Fallback 过滤</legend>
+                  <p className="dns-field-hint">
+                    决定哪些解析结果<u>需要切换到回退 DNS</u>。<br />
+                    <strong>GeoIP 过滤</strong>：开启后，主 DNS 解析出的 IP 不属于下方"GeoIP 代码"所指地区时，自动改用回退 DNS。常用来过滤掉国内 DNS 给国外站投的污染 IP。<br />
+                    <strong>GeoIP 代码</strong>：视为"本地/可信"的国家代码，通常填 <code>CN</code>。<br />
+                    <strong>域名列表</strong>：强制走回退 DNS 的域名（如 <code>+.google.com</code>），即便 GeoIP 检测通过也直接绕过主 DNS。
+                  </p>
 
                   <label className="dns-field">
                     <span>GeoIP 过滤</span>
@@ -1870,7 +1936,47 @@ function App() {
                 </button>
               </div>
             )}
+            {dnsSaveFeedback && (
+              <div
+                className={dnsSaveFeedback.kind === 'ok' ? 'dns-save-ok' : 'dns-save-err'}
+                role="status"
+              >
+                {dnsSaveFeedback.text}
+              </div>
+            )}
           </>
+        )}
+
+        {page === 'settings' && (
+          <div className="settings-page">
+            <fieldset className="dns-fieldset">
+              <legend className="dns-legend">启动</legend>
+              <p className="dns-field-hint">
+                <strong>开机自启</strong>：系统启动后自动以隐藏窗口的方式拉起 EasyProxy，并继续保持上次的代理 / TUN 状态。无需常驻系统也能拦截流量时开启。
+              </p>
+              <label className="dns-field">
+                <span>开机自启</span>
+                <button
+                  className={autostartEnabled ? 'dns-mini-toggle active' : 'dns-mini-toggle'}
+                  type="button"
+                  role="switch"
+                  aria-checked={autostartEnabled}
+                  onClick={async () => {
+                    const next = !autostartEnabled
+                    setAutostartEnabled(next)
+                    try {
+                      await invoke('set_autostart', { enabled: next })
+                    } catch (error) {
+                      setAutostartEnabled(!next)
+                      setMessage(displayError(error))
+                    }
+                  }}
+                >
+                  <span className="toggle-track" aria-hidden="true" />
+                </button>
+              </label>
+            </fieldset>
+          </div>
         )}
       </section>
 
