@@ -1,17 +1,30 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { listen } from '@tauri-apps/api/event'
-import { Pencil, Trash2, Layout, Share2, List, ChevronDown, Globe, Settings } from 'lucide-react'
+import { listen, type Event, type UnlistenFn } from '@tauri-apps/api/event'
+import { Pencil, Trash2, Layout, Share2, List, ChevronDown, Globe, Settings, FileText, Activity, RefreshCw, XCircle } from 'lucide-react'
 import './App.css'
 
 type CoreStatus = 'Stopped' | 'Running'
 type BackendProxyMode = 'Rule' | 'Global' | 'Direct'
-type Page = 'overview' | 'nodes' | 'rules' | 'dns' | 'settings'
+type Page = 'overview' | 'nodes' | 'connections' | 'rules' | 'dns' | 'logs' | 'settings'
+type ConnectionStatus = 'idle' | 'connecting' | 'live' | 'reconnecting' | 'error'
+type ConnectionFilter = 'all' | 'tcp' | 'udp' | 'proxy' | 'direct' | 'reject' | 'active'
+type ConnectionViewMode = 'list' | 'detail'
 
 const proxyModeOptions: Array<{ value: BackendProxyMode; label: string }> = [
   { value: 'Rule', label: '规则模式' },
   { value: 'Global', label: '全局模式' },
   { value: 'Direct', label: '直连模式' },
+]
+
+const connectionFilterOptions: Array<{ value: ConnectionFilter; label: string }> = [
+  { value: 'all', label: '全部' },
+  { value: 'tcp', label: 'TCP' },
+  { value: 'udp', label: 'UDP' },
+  { value: 'proxy', label: 'Proxy' },
+  { value: 'direct', label: 'DIRECT' },
+  { value: 'reject', label: 'REJECT' },
+  { value: 'active', label: '有流量' },
 ]
 
 interface AppStatus {
@@ -44,7 +57,44 @@ interface SavedSubscription extends ImportedSubscription {
   url: string
 }
 
-export function detectRuleType(input: string): string | null {
+interface LogBundle {
+  log: string
+  runtime_status: string
+}
+
+interface ConnectionMetadata {
+  network?: string
+  type?: string
+  sourceIP?: string
+  sourcePort?: string | number
+  destinationIP?: string
+  destinationPort?: string | number
+  host?: string
+  sniffHost?: string
+  process?: string
+  processPath?: string
+}
+
+interface ConnectionItem {
+  id: string
+  metadata?: ConnectionMetadata
+  upload: number
+  download: number
+  start: string
+  chains?: string[]
+  providerChains?: string[]
+  rule?: string
+  rulePayload?: string
+}
+
+interface ConnectionSnapshot {
+  downloadTotal: number
+  uploadTotal: number
+  memory: number
+  connections: ConnectionItem[]
+}
+
+function detectRuleType(input: string): string | null {
   const trimmed = input.trim()
   if (!trimmed) return null
   if (trimmed.includes('://')) return null
@@ -126,13 +176,74 @@ const browserPreviewSubscription: SavedSubscription = {
   node_types: {},
 }
 
+const browserPreviewConnectionSnapshot: ConnectionSnapshot = {
+  downloadTotal: 7_240_192,
+  uploadTotal: 938_240,
+  memory: 61_341_696,
+  connections: [
+    {
+      id: 'preview-youtube',
+      metadata: {
+        network: 'tcp',
+        type: 'HTTP',
+        sourceIP: '127.0.0.1',
+        sourcePort: '51842',
+        destinationIP: '142.250.190.78',
+        destinationPort: '443',
+        host: 'youtube.com',
+        process: 'Chrome',
+        processPath: '/Applications/Google Chrome.app',
+      },
+      upload: 88_064,
+      download: 1_284_096,
+      start: new Date(Date.now() - 202_000).toISOString(),
+      chains: ['Proxy', '香港 01'],
+      providerChains: ['香港 - 5 条', '香港 01'],
+      rule: 'DOMAIN-SUFFIX',
+      rulePayload: 'youtube.com',
+    },
+    {
+      id: 'preview-openai',
+      metadata: {
+        network: 'tcp',
+        type: 'HTTP',
+        sourceIP: '127.0.0.1',
+        sourcePort: '51844',
+        destinationIP: '104.18.33.45',
+        destinationPort: '443',
+        host: 'api.openai.com',
+        process: 'EasyProxy',
+      },
+      upload: 132_432,
+      download: 420_120,
+      start: new Date(Date.now() - 84_000).toISOString(),
+      chains: ['Proxy', '日本 02'],
+      providerChains: ['日本 - 5 条', '日本 02'],
+      rule: 'DOMAIN-KEYWORD',
+      rulePayload: 'openai',
+    },
+  ],
+}
+
 function isTauriRuntimeMissing(error: unknown) {
   const message = String(error)
   return message.includes("__TAURI_INTERNALS__") || message.includes("reading 'invoke'")
 }
 
+function isBrowserPreviewRuntime() {
+  return typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window)
+}
+
 function displayError(error: unknown) {
   return isTauriRuntimeMissing(error) ? browserPreviewMessage : String(error)
+}
+
+function listenOrNoop<T>(event: string, handler: (event: Event<T>) => void): Promise<UnlistenFn> {
+  try {
+    return listen<T>(event, handler).catch(() => () => {})
+  } catch {
+    return Promise.resolve(() => {})
+  }
 }
 
 function getSubscriptionName(url: string) {
@@ -231,6 +342,123 @@ function computeDefaultSelections(groups: ProxyGroupSummary[]): Record<string, s
   return selections
 }
 
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+  const digits = value >= 10 || unitIndex === 0 ? 0 : 1
+  return `${value.toFixed(digits)} ${units[unitIndex]}`
+}
+
+function formatRate(bytesPerSecond: number) {
+  return `${formatBytes(bytesPerSecond)}/s`
+}
+
+function formatDuration(start: string, nowMs: number) {
+  const startMs = Date.parse(start)
+  if (!Number.isFinite(startMs)) return '-'
+  const seconds = Math.max(0, Math.floor((nowMs - startMs) / 1000))
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  const secs = seconds % 60
+  if (hours > 0) return `${hours}h ${minutes}m`
+  if (minutes > 0) return `${minutes}m ${secs}s`
+  return `${secs}s`
+}
+
+function address(ip?: string, port?: string | number) {
+  if (!ip && !port) return '-'
+  if (!port) return ip ?? '-'
+  return `${ip || '-'}:${port}`
+}
+
+function connectionTarget(connection: ConnectionItem) {
+  const metadata = connection.metadata
+  return metadata?.sniffHost || metadata?.host || address(metadata?.destinationIP, metadata?.destinationPort)
+}
+
+function connectionProcess(connection: ConnectionItem) {
+  const metadata = connection.metadata
+  return metadata?.process || metadata?.type || metadata?.network?.toUpperCase() || '-'
+}
+
+function connectionNetwork(connection: ConnectionItem) {
+  return connection.metadata?.network?.toUpperCase() || '-'
+}
+
+function connectionNode(connection: ConnectionItem) {
+  const chains = connection.chains ?? []
+  return chains[chains.length - 1] ?? '-'
+}
+
+function connectionRoute(connection: ConnectionItem): 'Proxy' | 'DIRECT' | 'REJECT' | '' {
+  const haystack = [...(connection.chains ?? []), connection.rule ?? '', connection.rulePayload ?? '']
+    .join(' ')
+    .toLowerCase()
+  if (haystack.includes('reject')) return 'REJECT'
+  if (haystack.includes('direct')) return 'DIRECT'
+  if (connection.chains && connection.chains.length > 0) return 'Proxy'
+  return ''
+}
+
+function connectionMatchesSearch(connection: ConnectionItem, search: string) {
+  const query = search.trim().toLowerCase()
+  if (!query) return true
+  const metadata = connection.metadata
+  const text = [
+    connectionTarget(connection),
+    connectionProcess(connection),
+    connectionNode(connection),
+    connection.rule,
+    connection.rulePayload,
+    metadata?.destinationIP,
+    metadata?.sourceIP,
+    metadata?.processPath,
+  ].filter(Boolean).join(' ').toLowerCase()
+  return text.includes(query)
+}
+
+function connectionMatchesFilter(connection: ConnectionItem, filter: ConnectionFilter) {
+  if (filter === 'all') return true
+  if (filter === 'active') return connection.upload > 0 || connection.download > 0
+  const network = connection.metadata?.network?.toLowerCase()
+  if (filter === 'tcp' || filter === 'udp') return network === filter
+  return connectionRoute(connection).toLowerCase() === filter
+}
+
+function normalizeConnectionSnapshot(value: unknown): ConnectionSnapshot | null {
+  if (!value || typeof value !== 'object') return null
+  const raw = value as Partial<ConnectionSnapshot>
+  const connections = Array.isArray(raw.connections)
+    ? raw.connections
+        .filter((item): item is ConnectionItem => Boolean(item && typeof item === 'object'))
+        .map((item) => ({
+          ...item,
+          id: String(item.id ?? ''),
+          upload: Number(item.upload) || 0,
+          download: Number(item.download) || 0,
+          start: typeof item.start === 'string' ? item.start : new Date().toISOString(),
+          chains: Array.isArray(item.chains) ? item.chains.map(String) : [],
+          providerChains: Array.isArray(item.providerChains) ? item.providerChains.map(String) : [],
+          rule: item.rule ?? '',
+          rulePayload: item.rulePayload ?? '',
+        }))
+        .filter((item) => item.id)
+    : []
+
+  return {
+    downloadTotal: Number(raw.downloadTotal) || 0,
+    uploadTotal: Number(raw.uploadTotal) || 0,
+    memory: Number(raw.memory) || 0,
+    connections,
+  }
+}
+
 function SidebarSubscriptionItem({
   subscription,
   isSelected,
@@ -259,6 +487,7 @@ function SidebarSubscriptionItem({
 
 function App() {
   const [enabled, setEnabled] = useState(false)
+  const [coreStatus, setCoreStatus] = useState<CoreStatus>('Stopped')
   const [tunEnabled, setTunEnabled] = useState(false)
   const [autostartEnabled, setAutostartEnabled] = useState(false)
   const [subscriptionUrl, setSubscriptionUrl] = useState('')
@@ -287,7 +516,21 @@ function App() {
   const [overviewTab, setOverviewTab] = useState<'info' | 'nodes'>('info')
   const [proxyBypassDomains, setProxyBypassDomains] = useState<string[]>([])
   const [newBypassDomain, setNewBypassDomain] = useState('')
+  const [connectionSnapshot, setConnectionSnapshot] = useState<ConnectionSnapshot | null>(null)
+  const [previousConnectionSnapshot, setPreviousConnectionSnapshot] = useState<ConnectionSnapshot | null>(null)
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('idle')
+  const [connectionSearch, setConnectionSearch] = useState('')
+  const [connectionFilter, setConnectionFilter] = useState<ConnectionFilter>('all')
+  const [connectionViewMode, setConnectionViewMode] = useState<ConnectionViewMode>('list')
+  const [expandedConnections, setExpandedConnections] = useState<Set<string>>(() => new Set())
+  const [connectionCloseErrors, setConnectionCloseErrors] = useState<Record<string, string>>({})
+  const [connectionError, setConnectionError] = useState('')
+  const [connectionRefreshSeq, setConnectionRefreshSeq] = useState(0)
+  const [nowMs, setNowMs] = useState(Date.now())
   const hasRestored = useRef(false)
+  const connectionSocketRef = useRef<WebSocket | null>(null)
+  const connectionReconnectTimerRef = useRef<number | null>(null)
+  const connectionSnapshotRef = useRef<ConnectionSnapshot | null>(null)
 
   interface DnsOverrideConfig {
     enable?: boolean
@@ -328,6 +571,8 @@ function App() {
   const [dnsYamlError, setDnsYamlError] = useState('')
   const [dnsDirty, setDnsDirty] = useState(false)
   const [dnsSaveFeedback, setDnsSaveFeedback] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
+  const [logTab, setLogTab] = useState<'log' | 'status'>('status')
+  const [logs, setLogs] = useState<LogBundle>({ log: '', runtime_status: '' })
 
   const statusText = enabled ? '已连接' : '未连接'
   const currentSubscription = savedSubscriptions.find((item) => item.url === activeSubscription)
@@ -356,6 +601,31 @@ function App() {
   const newRuleDuplicate = customRules.some(
     r => r === `${newRuleType},${newRuleInput.trim()},${newRuleTarget}`
   )
+
+  const connectionItems = connectionSnapshot?.connections ?? []
+  const filteredConnections = useMemo(
+    () => connectionItems.filter((connection) =>
+      connectionMatchesSearch(connection, connectionSearch) &&
+      connectionMatchesFilter(connection, connectionFilter)
+    ),
+    [connectionItems, connectionSearch, connectionFilter],
+  )
+  const connectionDownloadRate = Math.max(
+    0,
+    (connectionSnapshot?.downloadTotal ?? 0) - (previousConnectionSnapshot?.downloadTotal ?? 0),
+  )
+  const connectionUploadRate = Math.max(
+    0,
+    (connectionSnapshot?.uploadTotal ?? 0) - (previousConnectionSnapshot?.uploadTotal ?? 0),
+  )
+  const connectionTotalTraffic = (connectionSnapshot?.downloadTotal ?? 0) + (connectionSnapshot?.uploadTotal ?? 0)
+  const connectionStatusLabel: Record<ConnectionStatus, string> = {
+    idle: '未连接',
+    connecting: '正在连接',
+    live: '实时更新',
+    reconnecting: '正在重连',
+    error: '连接控制器不可用',
+  }
 
   // Get a representative "current node" for the sidebar status — first select group's choice
   const statusNode = useMemo(() => {
@@ -437,6 +707,7 @@ function App() {
     invoke<AppStatus>('core_status')
       .then((status) => {
         if (!mounted) return
+        setCoreStatus(status.core)
         setEnabled(status.system_proxy !== '')
         setProxyMode(status.mode)
         setTunEnabled(status.tun_enabled)
@@ -457,7 +728,7 @@ function App() {
 
   // Listen for system proxy changes from tray menu
   useEffect(() => {
-    const unlisten = listen<boolean>('system-proxy-changed', (event) => {
+    const unlisten = listenOrNoop<boolean>('system-proxy-changed', (event) => {
       setEnabled(event.payload)
     })
     return () => {
@@ -467,13 +738,33 @@ function App() {
 
   // Listen for proxy mode changes from tray menu
   useEffect(() => {
-    const unlisten = listen<BackendProxyMode>('proxy-mode-changed', (event) => {
+    const unlisten = listenOrNoop<BackendProxyMode>('proxy-mode-changed', (event) => {
       setProxyMode(event.payload)
     })
     return () => {
       unlisten.then((fn) => fn())
     }
   }, [])
+
+  // Listen for TUN changes from tray menu
+  useEffect(() => {
+    const changed = listenOrNoop<boolean>('tun-mode-changed', (event) => {
+      setTunEnabled(event.payload)
+      setMessage(event.payload ? 'TUN 模式已开启' : 'TUN 模式已关闭')
+    })
+    const failed = listenOrNoop<string>('tun-mode-error', (event) => {
+      setMessage(displayError(event.payload))
+    })
+    return () => {
+      changed.then((fn) => fn())
+      failed.then((fn) => fn())
+    }
+  }, [])
+
+  // When TUN toggles, mihomo core restarts and loses in-memory selections
+  useEffect(() => {
+    hasRestored.current = false
+  }, [tunEnabled])
 
   // Restore saved node selections to Mihomo core on startup
   useEffect(() => {
@@ -493,8 +784,10 @@ function App() {
 
     try {
       const status = await invoke<AppStatus>('set_system_proxy', { enable: nextEnabled })
+      setCoreStatus(status.core)
       setEnabled(status.system_proxy !== '')
       setProxyMode(status.mode)
+      setTunEnabled(status.tun_enabled)
     } catch (error) {
       setEnabled(!nextEnabled)
       setMessage(displayError(error))
@@ -652,6 +945,7 @@ function App() {
 
     try {
       const status = await invoke<AppStatus>('set_proxy_mode', { mode })
+      setCoreStatus(status.core)
       setEnabled(status.system_proxy !== '')
       setProxyMode(status.mode)
     } catch (error) {
@@ -718,6 +1012,7 @@ function App() {
 
     try {
       const status = await invoke<AppStatus>('set_tun_mode', { enabled: nextEnabled })
+      setCoreStatus(status.core)
       setTunEnabled(status.tun_enabled)
       setEnabled(status.system_proxy !== '')
       setProxyMode(status.mode)
@@ -862,6 +1157,48 @@ function App() {
     }
   }
 
+  async function loadLogs() {
+    try {
+      const data = await invoke<LogBundle>('read_logs')
+      setLogs(data)
+    } catch (error) {
+      setLogs({
+        log: displayError(error),
+        runtime_status: displayError(error),
+      })
+    }
+  }
+
+  async function closeTrackedConnection(id: string) {
+    setConnectionCloseErrors((prev) => {
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
+    try {
+      await invoke('close_connection', { id })
+      setConnectionSnapshot((current) => current
+        ? { ...current, connections: current.connections.filter((connection) => connection.id !== id) }
+        : current)
+    } catch (error) {
+      setConnectionCloseErrors((prev) => ({ ...prev, [id]: displayError(error) }))
+    }
+  }
+
+  async function closeAllTrackedConnections() {
+    setConnectionError('')
+    try {
+      await invoke('close_all_connections')
+      setConnectionSnapshot((current) => current ? { ...current, connections: [] } : current)
+    } catch (error) {
+      setConnectionError(displayError(error))
+    }
+  }
+
+  const loadDnsOverrideRef = useRef(loadDnsOverride)
+  useEffect(() => {
+    loadDnsOverrideRef.current = loadDnsOverride
+  })
   async function saveDnsOverride() {
     if (!dnsOverride) return
 
@@ -882,6 +1219,7 @@ function App() {
     setDnsSaveFeedback(null)
     try {
       const status = await invoke<AppStatus>('set_dns_override', { dnsOverride: data })
+      setCoreStatus(status.core)
       setDnsOverride(data)
       setDnsForm(config)
       setDnsYaml(formToYaml(config))
@@ -901,9 +1239,96 @@ function App() {
 
   useEffect(() => {
     if (page === 'dns') {
-      loadDnsOverride()
+      const timer = window.setTimeout(() => {
+        void loadDnsOverrideRef.current()
+      }, 0)
+      return () => window.clearTimeout(timer)
     }
   }, [page])
+
+  useEffect(() => {
+    if (page === 'logs') {
+      loadLogs()
+      const interval = window.setInterval(loadLogs, 3000)
+      return () => window.clearInterval(interval)
+    }
+  }, [page])
+
+  useEffect(() => {
+    if (page !== 'connections') return
+
+    if (isBrowserPreviewRuntime()) {
+      connectionSnapshotRef.current = browserPreviewConnectionSnapshot
+      setConnectionSnapshot(browserPreviewConnectionSnapshot)
+      setPreviousConnectionSnapshot(browserPreviewConnectionSnapshot)
+      setConnectionStatus('live')
+      return
+    }
+
+    let disposed = false
+    const applySnapshot = (snapshot: ConnectionSnapshot) => {
+      setPreviousConnectionSnapshot(connectionSnapshotRef.current)
+      connectionSnapshotRef.current = snapshot
+      setConnectionSnapshot(snapshot)
+      setConnectionStatus('live')
+      setConnectionError('')
+      setNowMs(Date.now())
+    }
+    const clearReconnectTimer = () => {
+      if (connectionReconnectTimerRef.current !== null) {
+        window.clearTimeout(connectionReconnectTimerRef.current)
+        connectionReconnectTimerRef.current = null
+      }
+    }
+    const connect = () => {
+      if (disposed) return
+      clearReconnectTimer()
+      setConnectionStatus((status) => status === 'idle' ? 'connecting' : 'reconnecting')
+
+      try {
+        const socket = new WebSocket('ws://127.0.0.1:9090/connections?interval=1000')
+        connectionSocketRef.current = socket
+        socket.onopen = () => {
+          if (!disposed) setConnectionStatus('live')
+        }
+        socket.onmessage = (event) => {
+          try {
+            const snapshot = normalizeConnectionSnapshot(JSON.parse(String(event.data)))
+            if (snapshot) applySnapshot(snapshot)
+          } catch (error) {
+            setConnectionError(displayError(error))
+          }
+        }
+        socket.onerror = () => {
+          if (!disposed) setConnectionError('连接控制器不可用')
+        }
+        socket.onclose = () => {
+          if (connectionSocketRef.current === socket) {
+            connectionSocketRef.current = null
+          }
+          if (disposed) return
+          setConnectionStatus('reconnecting')
+          connectionReconnectTimerRef.current = window.setTimeout(connect, 2000)
+        }
+      } catch (error) {
+        setConnectionStatus('error')
+        setConnectionError(displayError(error))
+        connectionReconnectTimerRef.current = window.setTimeout(connect, 2000)
+      }
+    }
+
+    connect()
+    const clock = window.setInterval(() => setNowMs(Date.now()), 1000)
+
+    return () => {
+      disposed = true
+      clearReconnectTimer()
+      window.clearInterval(clock)
+      connectionSocketRef.current?.close()
+      connectionSocketRef.current = null
+      setConnectionStatus('idle')
+    }
+  }, [page, connectionRefreshSeq])
 
   return (
     <main className="app-shell">
@@ -930,6 +1355,16 @@ function App() {
           线路切换
         </button>
         <button
+          className={`nav-item ${page === 'connections' ? 'selected' : ''}`}
+          type="button"
+          onClick={() => setPage('connections')}
+        >
+          <span className="nav-icon">
+            <Activity size={16} />
+          </span>
+          连接
+        </button>
+        <button
           className={`nav-item ${page === 'rules' ? 'selected' : ''}`}
           type="button"
           onClick={() => setPage('rules')}
@@ -948,6 +1383,16 @@ function App() {
             <Globe size={16} />
           </span>
           DNS
+        </button>
+        <button
+          className={`nav-item ${page === 'logs' ? 'selected' : ''}`}
+          type="button"
+          onClick={() => setPage('logs')}
+        >
+          <span className="nav-icon">
+            <FileText size={16} />
+          </span>
+          日志
         </button>
         <button
           className={`nav-item ${page === 'settings' ? 'selected' : ''}`}
@@ -1390,6 +1835,182 @@ function App() {
       )}
       </div>
       </>
+        )}
+
+        {page === 'connections' && (
+          <div className="connections-page">
+            <div className="connections-toolbar">
+              <div className="connections-title">
+                <strong>{connectionItems.length} 个活动连接</strong>
+                <span>{connectionStatusLabel[connectionStatus]}</span>
+              </div>
+              <input
+                className="connections-search"
+                value={connectionSearch}
+                onChange={(event) => setConnectionSearch(event.target.value)}
+                placeholder="搜索域名、进程、规则或节点"
+                aria-label="搜索连接"
+              />
+              <div className="connections-view-toggle" role="group" aria-label="连接视图">
+                <button
+                  className={connectionViewMode === 'list' ? 'active' : ''}
+                  type="button"
+                  onClick={() => setConnectionViewMode('list')}
+                >
+                  列表
+                </button>
+                <button
+                  className={connectionViewMode === 'detail' ? 'active' : ''}
+                  type="button"
+                  onClick={() => setConnectionViewMode('detail')}
+                >
+                  详细
+                </button>
+              </div>
+              <button
+                className="connections-icon-btn"
+                type="button"
+                title="刷新"
+                aria-label="刷新连接"
+                onClick={() => setConnectionRefreshSeq((seq) => seq + 1)}
+              >
+                <RefreshCw size={15} />
+              </button>
+              <button
+                className="connections-danger-btn"
+                type="button"
+                disabled={connectionItems.length === 0}
+                onClick={closeAllTrackedConnections}
+              >
+                全部断开
+              </button>
+            </div>
+
+            {(connectionError || connectionStatus === 'reconnecting' || connectionStatus === 'error') && (
+              <div className="connection-error">
+                {connectionError || '连接控制器不可用，正在重连'}
+              </div>
+            )}
+
+            <div className="connections-metrics">
+              <div className="connections-metric">
+                <span>活动连接</span>
+                <strong>{connectionItems.length}</strong>
+              </div>
+              <div className="connections-metric">
+                <span>下载速率</span>
+                <strong>{formatRate(connectionDownloadRate)}</strong>
+              </div>
+              <div className="connections-metric">
+                <span>上传速率</span>
+                <strong>{formatRate(connectionUploadRate)}</strong>
+              </div>
+              <div className="connections-metric">
+                <span>总流量</span>
+                <strong>{formatBytes(connectionTotalTraffic)}</strong>
+              </div>
+            </div>
+
+            <div className="connections-filters" role="group" aria-label="连接筛选">
+              {connectionFilterOptions.map((filter) => (
+                <button
+                  key={filter.value}
+                  className={`connections-filter ${connectionFilter === filter.value ? 'active' : ''}`}
+                  type="button"
+                  onClick={() => setConnectionFilter(filter.value)}
+                >
+                  {filter.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="connections-list">
+              {!connectionSnapshot && coreStatus === 'Stopped' && !isBrowserPreviewRuntime() ? (
+                <div className="connection-empty">核心未运行，开启系统代理或 TUN 后查看连接</div>
+              ) : connectionItems.length === 0 ? (
+                <div className="connection-empty">暂无活动连接</div>
+              ) : filteredConnections.length === 0 ? (
+                <div className="connection-empty">未找到匹配的连接</div>
+              ) : (
+                filteredConnections.map((connection) => {
+                  const metadata = connection.metadata
+                  const expanded = connectionViewMode === 'detail' || expandedConnections.has(connection.id)
+                  const source = address(metadata?.sourceIP, metadata?.sourcePort)
+                  const destination = address(metadata?.destinationIP, metadata?.destinationPort)
+                  return (
+                    <div key={connection.id} className={`connection-row ${expanded ? 'expanded' : ''}`}>
+                      <div
+                        className="connection-main"
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => {
+                          setExpandedConnections((current) => {
+                            const next = new Set(current)
+                            if (next.has(connection.id)) next.delete(connection.id)
+                            else next.add(connection.id)
+                            return next
+                          })
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault()
+                            setExpandedConnections((current) => {
+                              const next = new Set(current)
+                              if (next.has(connection.id)) next.delete(connection.id)
+                              else next.add(connection.id)
+                              return next
+                            })
+                          }
+                        }}
+                      >
+                        <div className="connection-primary">
+                          <span className="connection-target">{connectionTarget(connection)}</span>
+                          <span className="connection-meta">
+                            {connectionProcess(connection)} · {connectionNetwork(connection)} · {connection.rule || '未命中规则'}
+                          </span>
+                        </div>
+                        <div className="connection-route">
+                          <span>{connectionRoute(connection) || '-'}</span>
+                          <strong>{connectionNode(connection)}</strong>
+                        </div>
+                        <div className="connection-stats">
+                          <span>↓ {formatBytes(connection.download)}</span>
+                          <span>↑ {formatBytes(connection.upload)}</span>
+                          <span>{formatDuration(connection.start, nowMs)}</span>
+                        </div>
+                        <button
+                          className="connection-close-btn"
+                          type="button"
+                          title="断开连接"
+                          aria-label={`断开 ${connectionTarget(connection)}`}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            void closeTrackedConnection(connection.id)
+                          }}
+                        >
+                          <XCircle size={15} />
+                        </button>
+                      </div>
+                      {connectionCloseErrors[connection.id] && (
+                        <div className="connection-row-error">{connectionCloseErrors[connection.id]}</div>
+                      )}
+                      {expanded && (
+                        <div className="connection-detail">
+                          <div><span>源地址</span><strong>{source}</strong></div>
+                          <div><span>目标地址</span><strong>{destination}</strong></div>
+                          <div><span>规则内容</span><strong>{connection.rulePayload || '-'}</strong></div>
+                          <div><span>链路</span><strong>{(connection.chains ?? []).join(' / ') || '-'}</strong></div>
+                          <div><span>Provider</span><strong>{(connection.providerChains ?? []).join(' / ') || '-'}</strong></div>
+                          <div><span>进程路径</span><strong>{metadata?.processPath || '-'}</strong></div>
+                          <div><span>ID</span><strong>{connection.id}</strong></div>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })
+              )}
+            </div>
+          </div>
         )}
 
         {page === 'rules' && (
@@ -1950,6 +2571,41 @@ function App() {
               </div>
             )}
           </>
+        )}
+
+        {page === 'logs' && (
+          <div className="logs-page">
+            <div className="logs-header">
+              <div>
+                <h2>日志</h2>
+                <p className="subtitle">查看 Mihomo 核心日志和当前端口/配置状态</p>
+              </div>
+              <div className="logs-actions">
+                <span className="logs-auto-refresh">每 3 秒自动刷新</span>
+              </div>
+            </div>
+
+            <div className="dns-tabs">
+              <button
+                className={`dns-tab ${logTab === 'status' ? 'active' : ''}`}
+                type="button"
+                onClick={() => setLogTab('status')}
+              >
+                运行状态
+              </button>
+              <button
+                className={`dns-tab ${logTab === 'log' ? 'active' : ''}`}
+                type="button"
+                onClick={() => setLogTab('log')}
+              >
+                核心日志
+              </button>
+            </div>
+
+            <pre className="logs-output">
+              {logTab === 'log' ? logs.log || '暂无日志' : logs.runtime_status || '暂无状态'}
+            </pre>
+          </div>
         )}
 
         {page === 'settings' && (

@@ -48,7 +48,12 @@ pub fn parse_subscription(content: &str) -> Result<SubscriptionSummary, String> 
             let all_names: Vec<String> = nodes.iter().map(|n| n.name.clone()).collect();
             let node_types: BTreeMap<String, String> = nodes
                 .iter()
-                .filter_map(|n| n.proxy.get("type")?.as_str().map(|t| (n.name.clone(), t.to_string())))
+                .filter_map(|n| {
+                    n.proxy
+                        .get("type")?
+                        .as_str()
+                        .map(|t| (n.name.clone(), t.to_string()))
+                })
                 .collect();
             let groups = build_groups_for_uri_nodes(&nodes);
             Ok(SubscriptionSummary {
@@ -90,16 +95,17 @@ pub fn save_subscription(path: &Path, content: &str) -> Result<SubscriptionSumma
 }
 
 pub fn merge_subscription(yaml_content: &str, uri_content: &str) -> Result<String, String> {
-    let mut yaml_doc: Value = parse_yaml_or_base64(yaml_content)
-        .ok_or_else(|| "无法解析 YAML 订阅内容".to_string())?;
+    let mut yaml_doc: Value =
+        parse_yaml_or_base64(yaml_content).ok_or_else(|| "无法解析 YAML 订阅内容".to_string())?;
 
     let uri_nodes = match parse_uri_or_base64(uri_content) {
         Some(nodes) => nodes,
         None => return Ok(yaml_content.to_string()),
     };
 
-    let (info_nodes, proxy_nodes): (Vec<_>, Vec<_>) =
-        uri_nodes.into_iter().partition(|n| is_info_node_name(&n.name));
+    let (info_nodes, proxy_nodes): (Vec<_>, Vec<_>) = uri_nodes
+        .into_iter()
+        .partition(|n| is_info_node_name(&n.name));
 
     let all_proxies: Vec<Value> = proxy_nodes
         .iter()
@@ -145,15 +151,9 @@ pub fn merge_subscription(yaml_content: &str, uri_content: &str) -> Result<Strin
     {
         for group in groups {
             if let Some(group_map) = group.as_mapping_mut() {
-                let group_type = group_map
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let group_type = group_map.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-                let this_group_name = group_map
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let this_group_name = group_map.get("name").and_then(|v| v.as_str()).unwrap_or("");
 
                 // Filter placeholders, resolve old names → URI names via stripped-name matching
                 let mut kept: Vec<Value> = group_map
@@ -201,10 +201,7 @@ pub fn merge_subscription(yaml_content: &str, uri_content: &str) -> Result<Strin
                     }
                 }
 
-                group_map.insert(
-                    Value::String("proxies".to_string()),
-                    Value::Sequence(kept),
-                );
+                group_map.insert(Value::String("proxies".to_string()), Value::Sequence(kept));
             }
         }
     }
@@ -496,10 +493,7 @@ fn strip_region_flags(name: &str) -> String {
 }
 
 fn is_info_node_name(name: &str) -> bool {
-    name.contains("流量")
-        || name.contains("重置")
-        || name.contains("到期")
-        || name.contains("官网")
+    name.contains("流量") || name.contains("重置") || name.contains("到期") || name.contains("官网")
 }
 
 fn extract_region(name: &str) -> String {
@@ -531,8 +525,9 @@ fn extract_region(name: &str) -> String {
 
 fn build_document_from_uri_nodes(nodes: Vec<UriProxyNode>) -> Value {
     // Separate info nodes from actual proxy nodes
-    let (info_nodes, proxy_nodes): (Vec<_>, Vec<_>) =
-        nodes.into_iter().partition(|node| is_info_node_name(&node.name));
+    let (info_nodes, proxy_nodes): (Vec<_>, Vec<_>) = nodes
+        .into_iter()
+        .partition(|node| is_info_node_name(&node.name));
 
     let proxies: Vec<Value> = proxy_nodes
         .iter()
@@ -615,10 +610,7 @@ fn build_document_from_uri_nodes(nodes: Vec<UriProxyNode>) -> Value {
         Value::Sequence(groups),
     );
 
-    let rules: Vec<Value> = default_rules()
-        .into_iter()
-        .map(Value::String)
-        .collect();
+    let rules: Vec<Value> = default_rules().into_iter().map(Value::String).collect();
     root.insert(Value::String("rules".to_string()), Value::Sequence(rules));
 
     Value::Mapping(root)
@@ -660,17 +652,25 @@ fn apply_runtime_settings(
         root.insert(Value::String("rules".to_string()), Value::Sequence(merged));
     }
 
+    root.remove(&Value::String("tun".to_string()));
     if tun_enabled {
         let mut tun_section = Mapping::new();
         insert_scalar(&mut tun_section, "enable", Value::Bool(true));
-        insert_scalar(&mut tun_section, "stack", Value::String("system".to_string()));
+        insert_scalar(
+            &mut tun_section,
+            "stack",
+            Value::String("system".to_string()),
+        );
         tun_section.insert(
             Value::String("dns-hijack".to_string()),
             Value::Sequence(vec![Value::String("any:53".to_string())]),
         );
         insert_scalar(&mut tun_section, "auto-route", Value::Bool(true));
         insert_scalar(&mut tun_section, "auto-detect-interface", Value::Bool(true));
-        root.insert(Value::String("tun".to_string()), Value::Mapping(tun_section));
+        root.insert(
+            Value::String("tun".to_string()),
+            Value::Mapping(tun_section),
+        );
     }
 
     if let Some(dns) = dns_override {

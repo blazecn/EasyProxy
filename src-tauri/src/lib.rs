@@ -97,6 +97,16 @@ fn ensure_mixed_port_free(port: u16) -> Result<(), String> {
     }
 }
 
+fn wait_until_port_free(port: u16, attempts: usize) -> bool {
+    for _ in 0..attempts {
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    false
+}
+
 fn reclaim_port(port: u16) {
     let output = Command::new("lsof")
         .args(["-ti", &format!(":{port}")])
@@ -114,6 +124,101 @@ fn reclaim_port(port: u16) {
             }
         }
     }
+    if wait_until_port_free(port, 20) {
+        return;
+    }
+
+    let output = Command::new("lsof")
+        .args(["-ti", &format!(":{port}")])
+        .output();
+    if let Ok(output) = output {
+        if output.status.success() {
+            let pids = String::from_utf8_lossy(&output.stdout);
+            for pid in pids.lines() {
+                let pid = pid.trim();
+                if pid.is_empty() {
+                    continue;
+                }
+                log::warn!("端口 {port} 仍被 PID {pid} 占用，强制清理");
+                let _ = Command::new("kill").arg("-9").arg(pid).status();
+            }
+        }
+    }
+    let _ = wait_until_port_free(port, 10);
+}
+
+fn is_easyproxy_mihomo_pid(pid: &str) -> bool {
+    if pid.is_empty() {
+        return false;
+    }
+    let output = Command::new("lsof").args(["-p", pid, "-Fn"]).output();
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let files = String::from_utf8_lossy(&output.stdout);
+    files.contains("/EasyProxy.app/Contents/Resources/binaries/mihomo")
+        || files.contains("/com.easyproxy.desktop/")
+        || files.contains("/com.easyproxy.app/")
+}
+
+fn reclaim_easyproxy_mihomo_listeners() {
+    let output = Command::new("lsof")
+        .args(["-nP", "-i:7897,9090,53", "-F", "pc"])
+        .output();
+    let Ok(output) = output else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+
+    let mut pids = Vec::new();
+    let mut current_pid = String::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(pid) = line.strip_prefix('p') {
+            current_pid = pid.to_string();
+        } else if let Some(command) = line.strip_prefix('c') {
+            if command == "mihomo" && is_easyproxy_mihomo_pid(&current_pid) {
+                pids.push(current_pid.clone());
+            }
+        }
+    }
+
+    pids.sort();
+    pids.dedup();
+    for pid in pids {
+        log::warn!("清理 EasyProxy 残留 Mihomo 进程 PID {pid}");
+        let _ = Command::new("kill").arg("-9").arg(&pid).status();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+}
+
+fn is_port_listening(port: u16) -> bool {
+    std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
+}
+
+fn wait_for_mixed_port(port: u16) -> Result<(), String> {
+    let addr = ("127.0.0.1", port);
+    for _ in 0..20 {
+        if std::net::TcpStream::connect(addr).is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Err(format!("Mihomo 启动后未监听 127.0.0.1:{port}"))
+}
+
+fn wait_for_tun_service_stopped() -> Result<(), String> {
+    for _ in 0..20 {
+        if !tun_service_core_running() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Err("TUN helper 已响应停止，但 Mihomo 仍在运行".to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +227,12 @@ struct AppStatus {
     mode: ProxyMode,
     system_proxy: String,
     tun_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LogBundle {
+    log: String,
+    runtime_status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,7 +259,8 @@ struct SavedSubscription {
 
 fn reload_running_core(state: &AppState, tun_enabled: bool) {
     let direct_running = state.core.status() == CoreStatus::Running;
-    if !direct_running && !tun_enabled {
+    let service_running = tun_service_core_running();
+    if !direct_running && !tun_enabled && !service_running {
         return;
     }
     let config_path = state.data_dir.join("mihomo.yaml");
@@ -172,8 +284,17 @@ fn core_status_inner(state: &AppState) -> Result<AppStatus, String> {
     } else {
         String::new()
     };
+    let core_status = if service_manager::is_installed() {
+        if tun_service_core_running() || state.core.status() == CoreStatus::Running {
+            CoreStatus::Running
+        } else {
+            CoreStatus::Stopped
+        }
+    } else {
+        state.core.status()
+    };
     Ok(AppStatus {
-        core: state.core.status(),
+        core: core_status,
         mode,
         system_proxy,
         tun_enabled,
@@ -434,11 +555,50 @@ async fn stop_core(state: State<'_, AppState>) -> Result<AppStatus, String> {
 }
 
 #[tauri::command]
+fn close_connection(id: String) -> Result<(), String> {
+    mihomo_api::close_connection(&id)
+}
+
+#[tauri::command]
+fn close_all_connections() -> Result<(), String> {
+    mihomo_api::close_all_connections()
+}
+
+#[tauri::command]
 async fn set_system_proxy(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     enable: bool,
 ) -> Result<AppStatus, String> {
+    if enable {
+        let tun_enabled = *state
+            .tun_enabled
+            .lock()
+            .map_err(|_| "读取 TUN 状态失败".to_string())?;
+
+        let svc_installed = service_manager::is_installed();
+        let is_running = if tun_enabled || svc_installed {
+            tun_service_core_running() || is_port_listening(MIXED_PORT)
+        } else {
+            state.core.status() == CoreStatus::Running
+        };
+
+        if !is_running {
+            if !tun_enabled && !svc_installed {
+                reclaim_easyproxy_mihomo_listeners();
+            }
+            start_core_inner_async(
+                tun_enabled || svc_installed,
+                state.core.clone(),
+                state.data_dir.clone(),
+                app.path()
+                    .resource_dir()
+                    .map_err(|e| format!("获取资源目录失败: {e}"))?,
+            )
+            .await?;
+        }
+    }
+
     let bypass = state
         .proxy_bypass
         .lock()
@@ -454,6 +614,10 @@ async fn set_system_proxy(
     })
     .await
     .map_err(|e| format!("系统代理操作失败: {e}"))??;
+    // Persist system proxy state
+    if let Ok(yaml) = serde_yaml::to_string(&enable) {
+        let _ = std::fs::write(state.data_dir.join("system_proxy.yaml"), yaml);
+    }
     update_tray_menu(&app, &state);
     core_status_inner(&state)
 }
@@ -545,6 +709,82 @@ fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+fn read_tail(path: &std::path::Path, max_lines: usize) -> String {
+    match std::fs::read_to_string(path) {
+        Ok(content) => {
+            let mut lines = content.lines().rev().take(max_lines).collect::<Vec<_>>();
+            lines.reverse();
+            lines.join("\n")
+        }
+        Err(error) => format!("读取 {} 失败: {error}", path.display()),
+    }
+}
+
+fn runtime_status_text(state: &AppState) -> String {
+    let tun_enabled = tun_enabled_val(state);
+    let tun_service_running = tun_service_core_running();
+    let direct_core = state.core.status();
+    let system_proxy = if state.proxy.is_enabled() {
+        state.proxy.endpoint()
+    } else {
+        "关闭".to_string()
+    };
+    let config_path = state.data_dir.join("mihomo.yaml");
+    let config_summary = std::fs::read_to_string(&config_path)
+        .map(|content| {
+            let has_tun = content.lines().any(|line| line.trim() == "tun:");
+            let interesting = content
+                .lines()
+                .filter(|line| {
+                    let trimmed = line.trim_start();
+                    trimmed.starts_with("mixed-port:")
+                        || trimmed.starts_with("external-controller:")
+                        || trimmed.starts_with("mode:")
+                        || trimmed.starts_with("tun:")
+                        || trimmed.starts_with("listen:")
+                        || trimmed.starts_with("enhanced-mode:")
+                })
+                .take(40)
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "配置文件: {}\n包含 tun: {has_tun}\n{interesting}",
+                config_path.display()
+            )
+        })
+        .unwrap_or_else(|error| format!("读取配置文件失败: {error}"));
+
+    let mut sections = Vec::new();
+    sections.push(format!(
+        "状态\nTUN 开关: {tun_enabled}\nTUN helper core: {tun_service_running}\n用户态 core: {:?}\n系统代理: {system_proxy}",
+        direct_core
+    ));
+    sections.push(format!(
+        "端口 7897\n{}",
+        if is_port_listening(7897) { "已监听" } else { "未监听" }
+    ));
+    sections.push(format!(
+        "端口 9090\n{}",
+        if is_port_listening(9090) { "已监听" } else { "未监听" }
+    ));
+    sections.push(format!(
+        "端口 53 TCP\n{}",
+        if is_port_listening(53) { "已监听" } else { "未监听" }
+    ));
+    sections.push("端口 53 UDP\n(未检测)".to_string());
+    sections.push(config_summary);
+    sections.join("\n\n")
+}
+
+#[tauri::command]
+fn read_logs(state: State<'_, AppState>) -> LogBundle {
+    let log_path = state.data_dir.join("mihomo.log");
+    LogBundle {
+        log: read_tail(&log_path, 500),
+        runtime_status: runtime_status_text(&state),
+    }
+}
+
 fn default_core_manager(app: &tauri::AppHandle) -> Result<CoreManager, String> {
     let data_dir = app_data_dir(app)?;
     let binary_name = if cfg!(target_os = "windows") {
@@ -589,21 +829,66 @@ fn ensure_mmdb(data_dir: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+async fn ensure_tun_service_current(app: &tauri::AppHandle) -> Result<(), String> {
+    let service_bin = app
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("获取资源目录失败: {e}"))?
+        .join("binaries")
+        .join("easyproxy-service");
+    let bin_path = service_bin.to_str().unwrap_or("").to_string();
+    if service_manager::needs_update(&bin_path) {
+        tauri::async_runtime::spawn_blocking(move || service_manager::install(&bin_path))
+            .await
+            .map_err(|e| format!("安装服务失败: {e}"))??;
+    }
+    Ok(())
+}
+
 async fn stop_core_inner_async(tun_enabled: bool, core: CoreManager) -> Result<(), String> {
-    if tun_enabled {
+    let use_service = tun_enabled || service_manager::is_installed();
+    if use_service {
         tauri::async_runtime::spawn_blocking(|| {
-            let mut stream = ipc::connect()?;
-            let msg = ipc::IpcMessage::new("stop", None);
-            ipc::send_message(&mut stream, &msg)?;
-            ipc::recv_message(&mut stream)?;
+            let stop_result = (|| {
+                let mut stream = ipc::connect()?;
+                let msg = ipc::IpcMessage::new("stop", None);
+                ipc::send_message(&mut stream, &msg)?;
+                ipc::recv_message(&mut stream)?;
+                Ok::<_, String>(())
+            })();
+            if let Err(error) = stop_result {
+                log::warn!("请求 TUN helper 停止失败，继续确认实际状态: {error}");
+            }
+            wait_for_tun_service_stopped()?;
             Ok::<_, String>(())
         })
         .await
         .map_err(|e| format!("停止 TUN 内核失败: {e}"))??;
-    } else {
-        core.stop()?;
     }
+    // Always stop CoreManager-managed child as fallback (no-op if None).
+    // This handles the transition case where the process was started via
+    // CoreManager before the service was installed.
+    core.stop()?;
     Ok(())
+}
+
+fn tun_service_core_running() -> bool {
+    if !cfg!(target_os = "macos") || !service_manager::is_service_loaded() {
+        return false;
+    }
+
+    let Ok(mut stream) = ipc::connect() else {
+        return false;
+    };
+    let msg = ipc::IpcMessage::new("status", None);
+    if ipc::send_message(&mut stream, &msg).is_err() {
+        return false;
+    }
+    ipc::recv_message(&mut stream)
+        .ok()
+        .and_then(|msg| msg.payload)
+        .and_then(|payload| payload.get("running").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
 }
 
 async fn start_core_inner_async(
@@ -612,7 +897,8 @@ async fn start_core_inner_async(
     data_dir: PathBuf,
     resource_dir: PathBuf,
 ) -> Result<(), String> {
-    if tun_enabled {
+    let use_service = tun_enabled || service_manager::is_installed();
+    if use_service {
         let data_dir_clone = data_dir.clone();
         tauri::async_runtime::spawn_blocking(move || {
             ensure_mmdb(&data_dir_clone)?;
@@ -633,36 +919,21 @@ async fn start_core_inner_async(
             Ok::<_, String>(())
         })
         .await
-        .map_err(|e| format!("启动 TUN 内核失败: {e}"))??;
+        .map_err(|e| format!("启动内核失败: {e}"))??;
     } else {
         core.start()?;
     }
+    wait_for_mixed_port(MIXED_PORT)?;
     Ok(())
 }
 
-#[tauri::command]
-async fn set_tun_mode(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
+async fn set_tun_mode_inner(
+    app: &tauri::AppHandle,
+    state: &AppState,
     enabled: bool,
 ) -> Result<AppStatus, String> {
     if !cfg!(target_os = "macos") {
         return Err("TUN 模式当前仅支持 macOS".to_string());
-    }
-
-    if enabled {
-        let service_bin = app
-            .path()
-            .resource_dir()
-            .map_err(|e| format!("获取资源目录失败: {e}"))?
-            .join("binaries")
-            .join("easyproxy-service");
-        let bin_path = service_bin.to_str().unwrap_or("").to_string();
-        if service_manager::needs_update(&bin_path) {
-            tauri::async_runtime::spawn_blocking(move || service_manager::install(&bin_path))
-                .await
-                .map_err(|e| format!("安装服务失败: {e}"))??;
-        }
     }
 
     let tun_was_running = *state
@@ -670,9 +941,9 @@ async fn set_tun_mode(
         .lock()
         .map_err(|_| "读取 TUN 状态失败".to_string())?;
     let direct_was_running = state.core.status() == CoreStatus::Running;
-    let was_running = tun_was_running || direct_was_running;
-    if was_running {
-        stop_core_inner_async(tun_was_running, state.core.clone()).await?;
+
+    if enabled || tun_was_running {
+        ensure_tun_service_current(app).await?;
     }
 
     *state
@@ -712,23 +983,74 @@ async fn set_tun_mode(
             )
         })
         .await
-        .map_err(|e| format!("写入配置失败: {e}"))??;
+        .map_err(|e| format!("写入配置失败: {e}"))?
+        .map_err(|error| {
+            if let Ok(mut tun_state) = state.tun_enabled.lock() {
+                *tun_state = tun_was_running;
+            }
+            error
+        })?;
     }
 
-    if enabled || direct_was_running {
-        start_core_inner_async(
-            enabled,
-            state.core.clone(),
-            state.data_dir.clone(),
-            app.path()
-                .resource_dir()
-                .map_err(|e| format!("获取资源目录失败: {e}"))?,
-        )
-        .await?;
+    let service_installed = service_manager::is_installed();
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("获取资源目录失败: {e}"))?;
+
+    if service_installed {
+        // Core runs via service for both TUN and non-TUN.
+        // TUN toggle only requires config reload, avoiding port conflicts.
+        let core_running = tun_service_core_running();
+
+        if direct_was_running {
+            stop_core_inner_async(false, state.core.clone()).await?;
+        }
+
+        if core_running {
+            let config_path = data_dir.join("mihomo.yaml");
+            tauri::async_runtime::spawn_blocking(move || {
+                mihomo_api::reload_config(&config_path)
+            })
+            .await
+            .map_err(|e| format!("热重载 TUN 配置失败: {e}"))??;
+        } else {
+            reclaim_easyproxy_mihomo_listeners();
+            start_core_inner_async(
+                true, // always use service when installed
+                state.core.clone(),
+                data_dir.clone(),
+                resource_dir,
+            )
+            .await?;
+        }
+    } else {
+        // No service installed: use CoreManager for user-mode only
+        if tun_was_running {
+            stop_core_inner_async(true, state.core.clone()).await?;
+        }
+        if direct_was_running {
+            stop_core_inner_async(false, state.core.clone()).await?;
+        }
+        reclaim_easyproxy_mihomo_listeners();
+        start_core_inner_async(false, state.core.clone(), data_dir, resource_dir).await?;
     }
 
-    update_tray_menu(&app, &state);
-    core_status_inner(&state)
+    update_tray_menu(app, state);
+    // Persist TUN state
+    if let Ok(yaml) = serde_yaml::to_string(&enabled) {
+        let _ = std::fs::write(state.data_dir.join("tun_enabled.yaml"), yaml);
+    }
+    core_status_inner(state)
+}
+
+#[tauri::command]
+async fn set_tun_mode(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<AppStatus, String> {
+    set_tun_mode_inner(&app, &state, enabled).await
 }
 
 #[tauri::command]
@@ -740,10 +1062,7 @@ fn get_autostart(state: State<'_, AppState>) -> Result<bool, String> {
 }
 
 #[tauri::command]
-fn set_autostart(
-    state: State<'_, AppState>,
-    enabled: bool,
-) -> Result<(), String> {
+fn set_autostart(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
     if enabled {
         autostart::enable()?;
     } else {
@@ -957,10 +1276,13 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            if let Err(message) = ensure_mixed_port_free(MIXED_PORT) {
-                show_fatal_error(&message);
-                app.handle().exit(1);
-                return Ok(());
+            let tun_running_at_launch = tun_service_core_running();
+            if !tun_running_at_launch {
+                if let Err(message) = ensure_mixed_port_free(MIXED_PORT) {
+                    show_fatal_error(&message);
+                    app.handle().exit(1);
+                    return Ok(());
+                }
             }
             let start_hidden = std::env::args().any(|arg| arg == "--hidden");
             let data_dir = app_data_dir(app.handle())?;
@@ -985,20 +1307,28 @@ pub fn run() {
                     .and_then(|s| serde_yaml::from_str(&s).ok())
                     .unwrap_or_default();
             let bypass_path = data_dir.join("proxy_bypass.yaml");
-            let proxy_bypass: Vec<String> =
-                if bypass_path.exists() {
-                    std::fs::read_to_string(&bypass_path)
-                        .ok()
-                        .and_then(|s| serde_yaml::from_str(&s).ok())
-                        .unwrap_or_else(default_bypass_domains)
-                } else {
-                    default_bypass_domains()
-                };
+            let proxy_bypass: Vec<String> = if bypass_path.exists() {
+                std::fs::read_to_string(&bypass_path)
+                    .ok()
+                    .and_then(|s| serde_yaml::from_str(&s).ok())
+                    .unwrap_or_else(default_bypass_domains)
+            } else {
+                default_bypass_domains()
+            };
             let autostart_enabled = autostart::is_enabled();
+            let saved_tun: Option<bool> = std::fs::read_to_string(data_dir.join("tun_enabled.yaml"))
+                .ok()
+                .and_then(|s| serde_yaml::from_str(&s).ok());
+            let saved_proxy: Option<bool> =
+                std::fs::read_to_string(data_dir.join("system_proxy.yaml"))
+                    .ok()
+                    .and_then(|s| serde_yaml::from_str(&s).ok());
+            // Prefer saved TUN state; fall back to runtime detection
+            let tun_enabled = saved_tun.unwrap_or(tun_running_at_launch);
             app.manage(AppState {
                 subscription: Mutex::new(subscription),
                 mode: Mutex::new(ProxyMode::Rule),
-                tun_enabled: Mutex::new(false),
+                tun_enabled: Mutex::new(tun_enabled),
                 dns_override: Mutex::new(dns_override),
                 subscriptions: Mutex::new(subscriptions),
                 selected_nodes: Mutex::new(selected_nodes),
@@ -1076,19 +1406,18 @@ pub fn run() {
                         "mode_direct" => apply_proxy_mode(&app, &state, ProxyMode::Direct),
                         "system_proxy" => {
                             let currently = state.proxy.is_enabled();
-                            if currently {
-                                let _ = state.proxy.disable();
-                            } else {
-                                let bypass = state
-                                    .proxy_bypass
-                                    .lock()
-                                    .ok()
-                                    .map(|g| g.clone())
-                                    .unwrap_or_default();
-                                let _ = state.proxy.enable(&bypass);
-                            }
-                            update_tray_menu(&app, &state);
-                            let _ = app.emit("system-proxy-changed", !currently);
+                            let handle = app.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let state = handle.state::<AppState>();
+                                match set_system_proxy(handle.clone(), state, !currently).await {
+                                    Ok(_) => {
+                                        let _ = handle.emit("system-proxy-changed", !currently);
+                                    }
+                                    Err(error) => {
+                                        let _ = handle.emit("system-proxy-error", error);
+                                    }
+                                }
+                            });
                         }
                         "tun_mode" => {
                             let currently = tun_enabled_val(&state);
@@ -1096,63 +1425,16 @@ pub fn run() {
                             let handle = app.clone();
                             tauri::async_runtime::spawn(async move {
                                 let state = handle.state::<AppState>();
-                                let tun_was_running = tun_enabled_val(&state);
-                                let direct_was_running = state.core.status() == CoreStatus::Running;
-                                let was_running = tun_was_running || direct_was_running;
-                                if was_running {
-                                    let _ =
-                                        stop_core_inner_async(tun_was_running, state.core.clone())
-                                            .await;
-                                }
-                                *state.tun_enabled.lock().unwrap() = enabled;
-                                if let Some(ref content) = sub_content(&state) {
-                                    let mode = state
-                                        .mode
-                                        .lock()
-                                        .ok()
-                                        .map(|m| *m)
-                                        .unwrap_or(ProxyMode::Rule);
-                                    let dns: Option<config_service::DnsOverride> =
-                                        state.dns_override.lock().ok().and_then(
-                                            |g: MutexGuard<
-                                                '_,
-                                                Option<config_service::DnsOverride>,
-                                            >| {
-                                                (*g).clone()
-                                            },
-                                        );
-                                    let custom_rules: Vec<String> = state
-                                        .custom_rules
-                                        .lock()
-                                        .ok()
-                                        .map(|g: MutexGuard<'_, Vec<String>>| (*g).clone())
-                                        .unwrap_or_default();
-                                    let config_path = state.data_dir.join("mihomo.yaml");
-                                    let sub_clone = content.clone();
-                                    let _ = tauri::async_runtime::spawn_blocking(move || {
-                                        write_runtime_config(
-                                            &config_path,
-                                            &sub_clone,
-                                            mode.as_mihomo_mode(),
-                                            enabled,
-                                            dns.as_ref(),
-                                            &custom_rules,
-                                        )
-                                    })
-                                    .await;
-                                }
-                                if enabled || direct_was_running {
-                                    if let Ok(rd) = handle.path().resource_dir() {
-                                        let _ = start_core_inner_async(
-                                            enabled,
-                                            state.core.clone(),
-                                            state.data_dir.clone(),
-                                            rd,
-                                        )
-                                        .await;
+                                match set_tun_mode_inner(&handle, &state, enabled).await {
+                                    Ok(status) => {
+                                        let _ = handle.emit("tun-mode-changed", status.tun_enabled);
+                                    }
+                                    Err(error) => {
+                                        log::warn!("托盘切换 TUN 模式失败: {error}");
+                                        update_tray_menu(&handle, &state);
+                                        let _ = handle.emit("tun-mode-error", error);
                                     }
                                 }
-                                update_tray_menu(&handle, &state);
                             });
                         }
                         "show_window" => {
@@ -1179,11 +1461,7 @@ pub fn run() {
                         .ok()
                         .map(|m| *m)
                         .unwrap_or(ProxyMode::Rule);
-                    let dns_override = state
-                        .dns_override
-                        .lock()
-                        .ok()
-                        .and_then(|g| g.clone());
+                    let dns_override = state.dns_override.lock().ok().and_then(|g| g.clone());
                     let custom_rules = state
                         .custom_rules
                         .lock()
@@ -1195,7 +1473,7 @@ pub fn run() {
                         &config_path,
                         sub,
                         mode.as_mihomo_mode(),
-                        false,
+                        tun_enabled,
                         dns_override.as_ref(),
                         &custom_rules,
                     ) {
@@ -1203,8 +1481,46 @@ pub fn run() {
                     }
                 }
             }
-            if let Err(e) = state.core.start() {
-                log::warn!("自动启动 Mihomo 内核失败: {e}");
+            let core_already_running = tun_service_core_running()
+                || state.core.status() == CoreStatus::Running;
+            if !core_already_running {
+                let resource_dir = app
+                    .path()
+                    .resource_dir()
+                    .map_err(|e| format!("获取资源目录失败: {e}"))
+                    .ok();
+                if service_manager::is_installed() {
+                    if let Some(ref resource_dir) = resource_dir {
+                        let core = state.core.clone();
+                        let data_dir_clone = data_dir.clone();
+                        let resource_dir_clone = resource_dir.clone();
+                        tauri::async_runtime::block_on(start_core_inner_async(
+                            true,
+                            core,
+                            data_dir_clone,
+                            resource_dir_clone,
+                        ))
+                        .unwrap_or_else(|e| {
+                            log::warn!("启动 Mihomo 内核失败（通过 service）: {e}")
+                        });
+                    }
+                } else {
+                    reclaim_easyproxy_mihomo_listeners();
+                    if let Err(e) = state.core.start() {
+                        log::warn!("自动启动 Mihomo 内核失败: {e}");
+                    }
+                }
+            }
+            // Restore system proxy if it was enabled before quit
+            if saved_proxy == Some(true) {
+                let bypass = state
+                    .proxy_bypass
+                    .lock()
+                    .map(|g| g.clone())
+                    .unwrap_or_else(|_| default_bypass_domains());
+                if let Err(e) = state.proxy.enable(&bypass) {
+                    log::warn!("恢复系统代理失败: {e}");
+                }
             }
             Ok(())
         })
@@ -1218,11 +1534,14 @@ pub fn run() {
             set_tun_mode,
             start_core,
             stop_core,
+            close_connection,
+            close_all_connections,
             test_delays,
             get_dns_override,
             set_dns_override,
             get_autostart,
             set_autostart,
+            read_logs,
             load_subscriptions,
             save_subscriptions,
             load_selected_nodes,
@@ -1241,14 +1560,19 @@ pub fn run() {
                     hide_main_window(app);
                     api.prevent_exit();
                 } else {
-                    let tun = state.tun_enabled.lock().ok().map(|g| *g).unwrap_or(false);
-                    if tun {
-                        if let Ok(mut stream) = ipc::connect() {
-                            let msg = ipc::IpcMessage::new("stop", None);
-                            let _ = ipc::send_message(&mut stream, &msg);
-                        }
+                    // Force-stop via IPC (immediate SIGKILL, no graceful wait)
+                    if let Ok(mut stream) = ipc::connect() {
+                        let msg = ipc::IpcMessage::new(
+                            "stop",
+                            Some(serde_json::json!({"force": true})),
+                        );
+                        let _ = ipc::send_message(&mut stream, &msg);
+                        let _ = ipc::recv_message(&mut stream);
                     }
+                    let _ = wait_for_tun_service_stopped();
+                    // Always stop CoreManager child as fallback
                     let _ = state.core.stop();
+                    reclaim_easyproxy_mihomo_listeners();
                     let _ = state.proxy.disable();
                 }
             }

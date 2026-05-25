@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -42,6 +43,17 @@ impl CoreManager {
             return Ok(CoreStatus::Running);
         }
 
+        let log_path = self
+            .config_path
+            .parent()
+            .map(|p| p.join("mihomo.log"))
+            .unwrap_or_else(|| PathBuf::from("mihomo.log"));
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|e| format!("打开 Mihomo 日志文件失败: {e}"))?;
+
         let mut command = Command::new(&self.binary_path);
         command.arg("-f").arg(&self.config_path);
         if let Some(working_dir) = self.config_path.parent() {
@@ -49,8 +61,12 @@ impl CoreManager {
         }
         let child = command
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::from(
+                log_file
+                    .try_clone()
+                    .map_err(|e| format!("复制文件描述符失败: {e}"))?,
+            ))
+            .stderr(Stdio::from(log_file))
             .spawn()
             .map_err(|error| format!("启动 Mihomo 失败: {error}"))?;
 
@@ -68,7 +84,7 @@ impl CoreManager {
             child
                 .kill()
                 .map_err(|error| format!("停止 Mihomo 失败: {error}"))?;
-            let _ = child.try_wait();
+            let _ = child.wait();
         }
 
         Ok(CoreStatus::Stopped)

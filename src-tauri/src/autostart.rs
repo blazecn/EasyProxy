@@ -13,8 +13,11 @@ pub fn is_enabled() -> bool {
 }
 
 pub fn enable() -> Result<(), String> {
-    let current_exe = std::env::current_exe().map_err(|e| format!("获取可执行文件路径失败: {e}"))?;
-    let exe_path = current_exe.to_str().ok_or("可执行文件路径包含非 UTF-8 字符")?;
+    let current_exe =
+        std::env::current_exe().map_err(|e| format!("获取可执行文件路径失败: {e}"))?;
+    let exe_path = current_exe
+        .to_str()
+        .ok_or("可执行文件路径包含非 UTF-8 字符")?;
 
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>

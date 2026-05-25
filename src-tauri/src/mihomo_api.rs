@@ -47,6 +47,38 @@ pub fn select_proxy_node(group: &str, node: &str) -> Result<(), String> {
     }
 }
 
+pub fn close_connection(id: &str) -> Result<(), String> {
+    let encoded_id = encode_uri_component(id);
+    let client = reqwest::blocking::Client::new();
+    let response = client
+        .delete(format!("{CONTROLLER}/connections/{encoded_id}"))
+        .send()
+        .map_err(|error| format!("关闭连接失败: {error}"))?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("关闭连接失败: Mihomo 返回 {}", response.status()))
+    }
+}
+
+pub fn close_all_connections() -> Result<(), String> {
+    let client = reqwest::blocking::Client::new();
+    let response = client
+        .delete(format!("{CONTROLLER}/connections"))
+        .send()
+        .map_err(|error| format!("关闭全部连接失败: {error}"))?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "关闭全部连接失败: Mihomo 返回 {}",
+            response.status()
+        ))
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DelayResult {
     pub delay: Option<u64>,
@@ -79,13 +111,25 @@ pub fn test_proxy_delays(nodes: &[String]) -> BTreeMap<String, DelayResult> {
 }
 
 fn encode_uri_component(s: &str) -> String {
-    s.bytes().map(|b| {
-        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'!' || b == b'~' || b == b'*' || b == b'\'' || b == b'(' || b == b')' {
-            (b as char).to_string()
-        } else {
-            format!("%{:02X}", b)
-        }
-    }).collect()
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric()
+                || b == b'-'
+                || b == b'_'
+                || b == b'.'
+                || b == b'!'
+                || b == b'~'
+                || b == b'*'
+                || b == b'\''
+                || b == b'('
+                || b == b')'
+            {
+                (b as char).to_string()
+            } else {
+                format!("%{:02X}", b)
+            }
+        })
+        .collect()
 }
 
 fn test_single_proxy(name: &str) -> DelayResult {
@@ -101,26 +145,69 @@ fn test_single_proxy(name: &str) -> DelayResult {
         .build()
     {
         Ok(c) => c,
-        Err(e) => return DelayResult { delay: None, error: Some(format!("client build: {e}")) },
+        Err(e) => {
+            return DelayResult {
+                delay: None,
+                error: Some(format!("client build: {e}")),
+            }
+        }
     };
 
     let resp = match client.get(&delay_url).send() {
         Ok(r) => r,
-        Err(e) => return DelayResult { delay: None, error: Some(format!("{e}")) },
+        Err(e) => {
+            return DelayResult {
+                delay: None,
+                error: Some(format!("{e}")),
+            }
+        }
     };
 
     let status = resp.status();
     let json: serde_json::Value = match resp.json() {
         Ok(j) => j,
-        Err(e) => return DelayResult { delay: None, error: Some(format!("json parse: {e}")) },
+        Err(e) => {
+            return DelayResult {
+                delay: None,
+                error: Some(format!("json parse: {e}")),
+            }
+        }
     };
 
     if status.is_success() {
         match json.get("delay").and_then(|v| v.as_u64()) {
-            Some(d) => DelayResult { delay: Some(d), error: None },
-            None => DelayResult { delay: None, error: Some(format!("missing delay field: {json}")) },
+            Some(d) => DelayResult {
+                delay: Some(d),
+                error: None,
+            },
+            None => DelayResult {
+                delay: None,
+                error: Some(format!("missing delay field: {json}")),
+            },
         }
     } else {
-        DelayResult { delay: None, error: Some(format!("HTTP {status}: {json}")) }
+        DelayResult {
+            delay: None,
+            error: Some(format!("HTTP {status}: {json}")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_uri_component;
+
+    #[test]
+    fn encode_uri_component_keeps_safe_ascii() {
+        assert_eq!(
+            encode_uri_component("abc-_.!~*'()XYZ09"),
+            "abc-_.!~*'()XYZ09"
+        );
+    }
+
+    #[test]
+    fn encode_uri_component_escapes_connection_ids_and_unicode() {
+        assert_eq!(encode_uri_component("id/with space?x=1"), "id%2Fwith%20space%3Fx%3D1");
+        assert_eq!(encode_uri_component("香港 01"), "%E9%A6%99%E6%B8%AF%2001");
     }
 }

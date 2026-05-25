@@ -4,12 +4,22 @@ const SERVICE_NAME: &str = "com.easyproxy.service";
 const PLIST_PATH: &str = "/Library/LaunchDaemons/com.easyproxy.service.plist";
 const SERVICE_BIN_NAME: &str = "easyproxy-service";
 const INSTALL_DIR: &str = "/usr/local/lib/easyproxy";
+const SERVICE_VERSION: &str = "6";
 
 pub fn is_installed() -> bool {
     std::path::Path::new(PLIST_PATH).exists()
 }
 
 pub fn is_service_loaded() -> bool {
+    let system_service = format!("system/{SERVICE_NAME}");
+    let system_output = Command::new("launchctl")
+        .arg("print")
+        .arg(&system_service)
+        .output();
+    if matches!(system_output, Ok(ref o) if o.status.success()) {
+        return true;
+    }
+
     let output = Command::new("launchctl")
         .arg("list")
         .arg(SERVICE_NAME)
@@ -25,10 +35,23 @@ pub fn needs_update(_bundled_binary: &str) -> bool {
     if !std::path::Path::new(&dest).exists() || !std::path::Path::new(PLIST_PATH).exists() {
         return true;
     }
-    // Only require reinstall if service binary or plist is missing.
+    if !is_installed_service_version_current() {
+        return true;
+    }
+    // Only require reinstall if service files are missing, service metadata is outdated,
+    // or launchd no longer has the service loaded.
     // Skip MD5 comparison to avoid password prompt on every rebuild during development.
     // Once installed, launchd KeepAlive keeps the service running across reboots.
     !is_service_loaded()
+}
+
+fn is_installed_service_version_current() -> bool {
+    std::fs::read_to_string(PLIST_PATH)
+        .map(|content| {
+            content.contains("<key>EasyProxyServiceVersion</key>")
+                && content.contains(&format!("<string>{SERVICE_VERSION}</string>"))
+        })
+        .unwrap_or(false)
 }
 
 pub fn install(binary_path: &str) -> Result<(), String> {
@@ -52,10 +75,16 @@ pub fn install(binary_path: &str) -> Result<(), String> {
     <string>/var/log/easyproxy-service.log</string>
     <key>StandardOutPath</key>
     <string>/var/log/easyproxy-service.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>EasyProxyServiceVersion</key>
+        <string>{version}</string>
+    </dict>
 </dict>
 </plist>"#,
         name = SERVICE_NAME,
         bin = dest,
+        version = SERVICE_VERSION,
     );
 
     let escaped_plist = plist

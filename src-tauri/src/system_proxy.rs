@@ -91,7 +91,7 @@ fn enable_platform_proxy(host: &str, port: u16, bypass_domains: &[String]) -> Re
 fn apply_bypass_for_service(service: &str, bypass_domains: &[String]) -> Result<(), String> {
     let mut args: Vec<&str> = vec!["-setproxybypassdomains", service];
     if bypass_domains.is_empty() {
-        args.push("");
+        args.push("Empty");
     } else {
         let domains: Vec<&str> = bypass_domains.iter().map(|s| s.as_str()).collect();
         args.extend(&domains);
@@ -113,7 +113,7 @@ fn disable_platform_proxy() -> Result<(), String> {
         run_networksetup(&["-setwebproxystate", &service, "off"])?;
         run_networksetup(&["-setsecurewebproxystate", &service, "off"])?;
         run_networksetup(&["-setsocksfirewallproxystate", &service, "off"])?;
-        run_networksetup(&["-setproxybypassdomains", &service, ""])?;
+        run_networksetup(&["-setproxybypassdomains", &service, "Empty"])?;
     }
 
     Ok(())
@@ -122,7 +122,7 @@ fn disable_platform_proxy() -> Result<(), String> {
 #[cfg(target_os = "macos")]
 fn network_services() -> Result<Vec<String>, String> {
     let output = Command::new("networksetup")
-        .arg("-listnetworkserviceorder")
+        .arg("-listallnetworkservices")
         .output()
         .map_err(|error| format!("读取 macOS 网络服务失败: {error}"))?;
 
@@ -132,18 +132,10 @@ fn network_services() -> Result<Vec<String>, String> {
 
     let services = String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            // Lines with service name start with "(N) " pattern
-            if trimmed.starts_with('(') {
-                trimmed.splitn(2, ')')
-                    .nth(1)
-                    .map(|s| s.trim().to_string())
-            } else {
-                None
-            }
-        })
-        .filter(|s| !s.is_empty())
+        .skip(1) // Skip "An asterisk (*) denotes that a network service is disabled."
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .map(|line| line.trim_start_matches('*').trim().to_string())
         .collect::<Vec<_>>();
 
     Ok(services)
@@ -252,7 +244,11 @@ fn is_platform_proxy_enabled() -> bool {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn enable_platform_proxy(_host: &str, _port: u16, _bypass_domains: &[String]) -> Result<(), String> {
+fn enable_platform_proxy(
+    _host: &str,
+    _port: u16,
+    _bypass_domains: &[String],
+) -> Result<(), String> {
     Err("当前平台暂不支持自动设置系统代理".to_string())
 }
 
