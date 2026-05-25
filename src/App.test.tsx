@@ -44,7 +44,7 @@ beforeEach(() => {
       return Promise.resolve({
         core: 'Stopped',
         mode: 'Rule',
-        system_proxy: '127.0.0.1:7890',
+        system_proxy: '127.0.0.1:7897',
       })
     }
 
@@ -100,7 +100,7 @@ beforeEach(() => {
       return Promise.resolve({
         core: 'Stopped',
         mode: 'Global',
-        system_proxy: '127.0.0.1:7890',
+        system_proxy: '127.0.0.1:7897',
       })
     }
 
@@ -344,7 +344,7 @@ describe('EasyProxy shell', () => {
         return Promise.resolve({
           core: 'Stopped',
           mode: 'Rule',
-          system_proxy: '127.0.0.1:7890',
+          system_proxy: '127.0.0.1:7897',
         })
       }
 
