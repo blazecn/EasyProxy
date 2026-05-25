@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Mutex, MutexGuard,
@@ -79,9 +80,39 @@ fn ensure_mixed_port_free(port: u16) -> Result<(), String> {
             drop(listener);
             Ok(())
         }
-        Err(error) => Err(format!(
-            "本地端口 127.0.0.1:{port} 已被其他程序占用（{error}），\nEasyProxy 需要该端口提供 HTTP/SOCKS 代理。请关闭占用该端口的程序后重试。"
-        )),
+        Err(_) => {
+            // Try to reclaim the port by killing the leftover process
+            reclaim_port(port);
+            // Check again after reclaim
+            match std::net::TcpListener::bind(("127.0.0.1", port)) {
+                Ok(listener) => {
+                    drop(listener);
+                    Ok(())
+                }
+                Err(error) => Err(format!(
+                    "本地端口 127.0.0.1:{port} 已被其他程序占用（{error}），\nEasyProxy 需要该端口提供 HTTP/SOCKS 代理。请关闭占用该端口的程序后重试。"
+                )),
+            }
+        }
+    }
+}
+
+fn reclaim_port(port: u16) {
+    let output = Command::new("lsof")
+        .args(["-ti", &format!(":{port}")])
+        .output();
+    if let Ok(output) = output {
+        if output.status.success() {
+            let pids = String::from_utf8_lossy(&output.stdout);
+            for pid in pids.lines() {
+                let pid = pid.trim();
+                if pid.is_empty() {
+                    continue;
+                }
+                log::info!("端口 {port} 被 PID {pid} 占用，尝试清理残留进程");
+                let _ = Command::new("kill").arg(pid).status();
+            }
+        }
     }
 }
 
@@ -1210,8 +1241,15 @@ pub fn run() {
                     hide_main_window(app);
                     api.prevent_exit();
                 } else {
-                    let _ = state.proxy.disable();
+                    let tun = state.tun_enabled.lock().ok().map(|g| *g).unwrap_or(false);
+                    if tun {
+                        if let Ok(mut stream) = ipc::connect() {
+                            let msg = ipc::IpcMessage::new("stop", None);
+                            let _ = ipc::send_message(&mut stream, &msg);
+                        }
+                    }
                     let _ = state.core.stop();
+                    let _ = state.proxy.disable();
                 }
             }
         });

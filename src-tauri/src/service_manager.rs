@@ -9,28 +9,26 @@ pub fn is_installed() -> bool {
     std::path::Path::new(PLIST_PATH).exists()
 }
 
-pub fn needs_update(bundled_binary: &str) -> bool {
+pub fn is_service_loaded() -> bool {
+    let output = Command::new("launchctl")
+        .arg("list")
+        .arg(SERVICE_NAME)
+        .output();
+    match output {
+        Ok(o) => o.status.success(),
+        Err(_) => false,
+    }
+}
+
+pub fn needs_update(_bundled_binary: &str) -> bool {
     let dest = format!("{}/{}", INSTALL_DIR, SERVICE_BIN_NAME);
     if !std::path::Path::new(&dest).exists() || !std::path::Path::new(PLIST_PATH).exists() {
         return true;
     }
-    // Compare file contents
-    let bundled_md5 = md5_of_file(bundled_binary);
-    let deployed_md5 = md5_of_file(&dest);
-    bundled_md5 != deployed_md5 || bundled_md5.is_none()
-}
-
-fn md5_of_file(path: &str) -> Option<String> {
-    let output = Command::new("md5")
-        .arg("-q")
-        .arg(path)
-        .output()
-        .ok()?;
-    if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        None
-    }
+    // Only require reinstall if service binary or plist is missing.
+    // Skip MD5 comparison to avoid password prompt on every rebuild during development.
+    // Once installed, launchd KeepAlive keeps the service running across reboots.
+    !is_service_loaded()
 }
 
 pub fn install(binary_path: &str) -> Result<(), String> {
