@@ -42,9 +42,12 @@ impl CoreManager {
             return Ok(CoreStatus::Running);
         }
 
-        let child = Command::new(&self.binary_path)
-            .arg("-f")
-            .arg(&self.config_path)
+        let mut command = Command::new(&self.binary_path);
+        command.arg("-f").arg(&self.config_path);
+        if let Some(working_dir) = self.config_path.parent() {
+            command.arg("-d").arg(working_dir);
+        }
+        let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

@@ -1,13 +1,41 @@
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
 use std::time::Duration;
 
 const CONTROLLER: &str = "http://127.0.0.1:9090";
 
+pub fn reload_config(config_path: &Path) -> Result<(), String> {
+    // Use inline payload instead of path. Mihomo restricts the `path` field to
+    // its HomeDir (the -d flag), but accepts arbitrary YAML via `payload`.
+    let payload = fs::read_to_string(config_path)
+        .map_err(|error| format!("读取 Mihomo 配置失败: {error}"))?;
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| format!("创建 HTTP 客户端失败: {error}"))?;
+    let response = client
+        .put(format!("{CONTROLLER}/configs?force=true"))
+        .json(&json!({ "payload": payload }))
+        .send()
+        .map_err(|error| format!("重载配置失败: {error}"))?;
+
+    let status = response.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        let body = response.text().unwrap_or_default();
+        Err(format!("重载配置失败: Mihomo 返回 {status} {body}"))
+    }
+}
+
 pub fn select_proxy_node(group: &str, node: &str) -> Result<(), String> {
+    let encoded_group = encode_uri_component(group);
     let client = reqwest::blocking::Client::new();
     let response = client
-        .put(format!("{CONTROLLER}/proxies/{group}"))
+        .put(format!("{CONTROLLER}/proxies/{encoded_group}"))
         .json(&json!({ "name": node }))
         .send()
         .map_err(|error| format!("切换节点失败: {error}"))?;

@@ -67,13 +67,14 @@ pub fn build_mihomo_config(
     mode: &str,
     tun_enabled: bool,
     dns_override: Option<&DnsOverride>,
+    custom_rules: &[String],
 ) -> Result<String, String> {
     let mut document = match parse_document(content)? {
         SubscriptionDocument::Clash(document) => document,
         SubscriptionDocument::UriList(nodes) => build_document_from_uri_nodes(nodes),
     };
 
-    apply_runtime_settings(&mut document, mode, tun_enabled, dns_override)?;
+    apply_runtime_settings(&mut document, mode, tun_enabled, dns_override, custom_rules)?;
 
     serde_yaml::to_string(&document).map_err(|error| format!("生成 Mihomo 配置失败: {error}"))
 }
@@ -233,12 +234,13 @@ pub fn write_runtime_config(
     mode: &str,
     tun_enabled: bool,
     dns_override: Option<&DnsOverride>,
+    custom_rules: &[String],
 ) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("创建运行目录失败: {error}"))?;
     }
 
-    let config = build_mihomo_config(content, mode, tun_enabled, dns_override)?;
+    let config = build_mihomo_config(content, mode, tun_enabled, dns_override, custom_rules)?;
     fs::write(path, config).map_err(|error| format!("写入 Mihomo 配置失败: {error}"))
 }
 
@@ -627,12 +629,13 @@ fn apply_runtime_settings(
     mode: &str,
     tun_enabled: bool,
     dns_override: Option<&DnsOverride>,
+    custom_rules: &[String],
 ) -> Result<(), String> {
     let root = document
         .as_mapping_mut()
         .ok_or_else(|| "订阅配置格式无效".to_string())?;
 
-    insert_scalar(root, "mixed-port", Value::Number(7890.into()));
+    insert_scalar(root, "mixed-port", Value::Number(7897.into()));
     insert_scalar(root, "allow-lan", Value::Bool(false));
     insert_scalar(root, "mode", Value::String(mode.to_string()));
     insert_scalar(
@@ -641,6 +644,21 @@ fn apply_runtime_settings(
         Value::String("127.0.0.1:9090".to_string()),
     );
     insert_scalar(root, "secret", Value::String(String::new()));
+
+    // Prepend custom rules before subscription rules (custom rules take priority)
+    if !custom_rules.is_empty() {
+        let custom_entries: Vec<Value> = custom_rules
+            .iter()
+            .map(|r| Value::String(r.clone()))
+            .collect();
+        let existing_rules: Vec<Value> = root
+            .get("rules")
+            .and_then(|v| v.as_sequence())
+            .map(|seq| seq.iter().cloned().collect())
+            .unwrap_or_default();
+        let merged: Vec<Value> = custom_entries.into_iter().chain(existing_rules).collect();
+        root.insert(Value::String("rules".to_string()), Value::Sequence(merged));
+    }
 
     if tun_enabled {
         let mut tun_section = Mapping::new();
@@ -658,7 +676,14 @@ fn apply_runtime_settings(
     if let Some(dns) = dns_override {
         if dns.enabled {
             root.insert(Value::String("dns".to_string()), dns.config.clone());
+        } else {
+            // DNS override explicitly disabled: remove subscription DNS, let mihomo use system DNS
+            root.remove(&Value::String("dns".to_string()));
         }
+    } else {
+        // No DNS override configured: remove subscription DNS to avoid fake-ip breaking
+        // internal domains that require system DNS resolution
+        root.remove(&Value::String("dns".to_string()));
     }
 
     Ok(())
