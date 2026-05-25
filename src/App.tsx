@@ -9,7 +9,6 @@ type BackendProxyMode = 'Rule' | 'Global' | 'Direct'
 type Page = 'overview' | 'nodes' | 'connections' | 'rules' | 'dns' | 'logs' | 'settings'
 type ConnectionStatus = 'idle' | 'connecting' | 'live' | 'reconnecting' | 'error'
 type ConnectionFilter = 'all' | 'tcp' | 'udp' | 'proxy' | 'direct' | 'reject' | 'active'
-type ConnectionViewMode = 'list' | 'detail'
 
 const proxyModeOptions: Array<{ value: BackendProxyMode; label: string }> = [
   { value: 'Rule', label: '规则模式' },
@@ -521,7 +520,6 @@ function App() {
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('idle')
   const [connectionSearch, setConnectionSearch] = useState('')
   const [connectionFilter, setConnectionFilter] = useState<ConnectionFilter>('all')
-  const [connectionViewMode, setConnectionViewMode] = useState<ConnectionViewMode>('list')
   const [expandedConnections, setExpandedConnections] = useState<Set<string>>(() => new Set())
   const [connectionCloseErrors, setConnectionCloseErrors] = useState<Record<string, string>>({})
   const [connectionError, setConnectionError] = useState('')
@@ -573,6 +571,8 @@ function App() {
   const [dnsSaveFeedback, setDnsSaveFeedback] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
   const [logTab, setLogTab] = useState<'log' | 'status'>('status')
   const [logs, setLogs] = useState<LogBundle>({ log: '', runtime_status: '' })
+  const [logsLoading, setLogsLoading] = useState(false)
+  const [logsFollow, setLogsFollow] = useState(false)
 
   const statusText = enabled ? '已连接' : '未连接'
   const currentSubscription = savedSubscriptions.find((item) => item.url === activeSubscription)
@@ -1158,6 +1158,7 @@ function App() {
   }
 
   async function loadLogs() {
+    setLogsLoading(true)
     try {
       const data = await invoke<LogBundle>('read_logs')
       setLogs(data)
@@ -1166,6 +1167,8 @@ function App() {
         log: displayError(error),
         runtime_status: displayError(error),
       })
+    } finally {
+      setLogsLoading(false)
     }
   }
 
@@ -1248,11 +1251,17 @@ function App() {
 
   useEffect(() => {
     if (page === 'logs') {
-      loadLogs()
-      const interval = window.setInterval(loadLogs, 3000)
-      return () => window.clearInterval(interval)
+      void loadLogs()
     }
-  }, [page])
+  }, [page, logTab])
+
+  useEffect(() => {
+    if (page !== 'logs' || logTab !== 'log' || !logsFollow) return
+    const interval = window.setInterval(() => {
+      void loadLogs()
+    }, 2000)
+    return () => window.clearInterval(interval)
+  }, [page, logTab, logsFollow])
 
   useEffect(() => {
     if (page !== 'connections') return
@@ -1851,22 +1860,6 @@ function App() {
                 placeholder="搜索域名、进程、规则或节点"
                 aria-label="搜索连接"
               />
-              <div className="connections-view-toggle" role="group" aria-label="连接视图">
-                <button
-                  className={connectionViewMode === 'list' ? 'active' : ''}
-                  type="button"
-                  onClick={() => setConnectionViewMode('list')}
-                >
-                  列表
-                </button>
-                <button
-                  className={connectionViewMode === 'detail' ? 'active' : ''}
-                  type="button"
-                  onClick={() => setConnectionViewMode('detail')}
-                >
-                  详细
-                </button>
-              </div>
               <button
                 className="connections-icon-btn"
                 type="button"
@@ -1934,7 +1927,7 @@ function App() {
               ) : (
                 filteredConnections.map((connection) => {
                   const metadata = connection.metadata
-                  const expanded = connectionViewMode === 'detail' || expandedConnections.has(connection.id)
+                  const expanded = expandedConnections.has(connection.id)
                   const source = address(metadata?.sourceIP, metadata?.sourcePort)
                   const destination = address(metadata?.destinationIP, metadata?.destinationPort)
                   return (
@@ -2581,7 +2574,28 @@ function App() {
                 <p className="subtitle">查看 Mihomo 核心日志和当前端口/配置状态</p>
               </div>
               <div className="logs-actions">
-                <span className="logs-auto-refresh">每 3 秒自动刷新</span>
+                {logTab === 'log' && (
+                  <button
+                    className={logsFollow ? 'logs-follow active' : 'logs-follow'}
+                    type="button"
+                    role="switch"
+                    aria-checked={logsFollow}
+                    onClick={() => setLogsFollow((value) => !value)}
+                  >
+                    跟随
+                    <span className="toggle-track" aria-hidden="true" />
+                  </button>
+                )}
+                <button
+                  className="logs-refresh-btn"
+                  type="button"
+                  title="刷新"
+                  aria-label="刷新日志"
+                  disabled={logsLoading}
+                  onClick={() => void loadLogs()}
+                >
+                  <RefreshCw size={15} />
+                </button>
               </div>
             </div>
 
