@@ -285,6 +285,8 @@ function App() {
   const [newRuleTarget, setNewRuleTarget] = useState<'Proxy' | 'DIRECT' | 'REJECT'>('Proxy')
   const [page, setPage] = useState<Page>('overview')
   const [overviewTab, setOverviewTab] = useState<'info' | 'nodes'>('info')
+  const [proxyBypassDomains, setProxyBypassDomains] = useState<string[]>([])
+  const [newBypassDomain, setNewBypassDomain] = useState('')
   const hasRestored = useRef(false)
 
   interface DnsOverrideConfig {
@@ -368,13 +370,16 @@ function App() {
 
     async function loadData() {
       try {
-        const [subscriptions, savedNodes, savedRules] = await Promise.all([
+        const [subscriptions, savedNodes, savedRules, savedBypass] = await Promise.all([
           invoke<SavedSubscription[]>('load_subscriptions'),
           invoke<Record<string, string>>('load_selected_nodes'),
           invoke<string[]>('load_custom_rules'),
+          invoke<string[]>('load_proxy_bypass'),
         ])
 
         if (!mounted) return
+
+        setProxyBypassDomains(savedBypass)
 
         const validated = subscriptions.filter(
           (item): item is SavedSubscription =>
@@ -1975,6 +1980,80 @@ function App() {
                   <span className="toggle-track" aria-hidden="true" />
                 </button>
               </label>
+            </fieldset>
+
+            <fieldset className="dns-fieldset">
+              <legend className="dns-legend">代理绕过</legend>
+              <p className="dns-field-hint">
+                <strong>绕过域名</strong>：匹配的域名流量不经过系统代理，直接使用系统网络栈。
+                适用于需要系统客户端证书（mTLS）的网站。支持通配符 <code>*</code>（如 <code>*.example.com</code>）。
+              </p>
+              <div className="bypass-input-row">
+                <input
+                  className="modal-input"
+                  value={newBypassDomain}
+                  onChange={(e) => setNewBypassDomain(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && newBypassDomain.trim()) {
+                      const domain = newBypassDomain.trim()
+                      if (proxyBypassDomains.includes(domain)) return
+                      const next = [...proxyBypassDomains, domain]
+                      setProxyBypassDomains(next)
+                      setNewBypassDomain('')
+                      invoke('save_proxy_bypass', { domains: next }).catch((error) => {
+                        setProxyBypassDomains(proxyBypassDomains)
+                        setMessage(displayError(error))
+                      })
+                    }
+                  }}
+                  placeholder="例如 *.internal.com 或 example.com"
+                  aria-label="绕过域名"
+                />
+                <button
+                  type="button"
+                  className="dns-save-btn"
+                  disabled={!newBypassDomain.trim()}
+                  onClick={() => {
+                    const domain = newBypassDomain.trim()
+                    if (!domain || proxyBypassDomains.includes(domain)) return
+                    const next = [...proxyBypassDomains, domain]
+                    setProxyBypassDomains(next)
+                    setNewBypassDomain('')
+                    invoke('save_proxy_bypass', { domains: next }).catch((error) => {
+                      setProxyBypassDomains(proxyBypassDomains)
+                      setMessage(displayError(error))
+                    })
+                  }}
+                >
+                  添加
+                </button>
+              </div>
+              {proxyBypassDomains.length > 0 ? (
+                <div className="rules-page-list">
+                  {proxyBypassDomains.map((domain) => (
+                    <div key={domain} className="rules-page-item rules-page-item-custom">
+                      <span>{domain}</span>
+                      <button
+                        className="rules-delete-btn"
+                        type="button"
+                        title="删除"
+                        onClick={() => {
+                          const next = proxyBypassDomains.filter((d) => d !== domain)
+                          setProxyBypassDomains(next)
+                          invoke('save_proxy_bypass', { domains: next }).catch((error) => {
+                            setProxyBypassDomains(proxyBypassDomains)
+                            setMessage(displayError(error))
+                          })
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <span className="rules-page-placeholder">暂无绕过域名</span>
+              )}
             </fieldset>
           </div>
         )}

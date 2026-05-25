@@ -35,6 +35,7 @@ struct AppState {
     subscriptions: Mutex<Vec<SavedSubscription>>,
     selected_nodes: Mutex<HashMap<String, String>>,
     custom_rules: Mutex<Vec<String>>,
+    proxy_bypass: Mutex<Vec<String>>,
     autostart_enabled: Mutex<bool>,
     data_dir: PathBuf,
     core: CoreManager,
@@ -43,6 +44,19 @@ struct AppState {
 }
 
 const MIXED_PORT: u16 = 7897;
+
+fn default_bypass_domains() -> Vec<String> {
+    vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+        "*.local".to_string(),
+        "10.0.0.0/8".to_string(),
+        "172.16.0.0/12".to_string(),
+        "192.168.0.0/16".to_string(),
+        "169.254.0.0/16".to_string(),
+    ]
+}
 
 fn show_fatal_error(message: &str) {
     eprintln!("EasyProxy 启动失败: {message}");
@@ -394,10 +408,15 @@ async fn set_system_proxy(
     state: State<'_, AppState>,
     enable: bool,
 ) -> Result<AppStatus, String> {
+    let bypass = state
+        .proxy_bypass
+        .lock()
+        .map_err(|_| "读取绕过域名失败".to_string())?
+        .clone();
     let proxy = state.proxy.clone();
     tauri::async_runtime::spawn_blocking(move || {
         if enable {
-            proxy.enable()
+            proxy.enable(&bypass)
         } else {
             proxy.disable()
         }
@@ -817,6 +836,37 @@ fn save_custom_rules(
     Ok(())
 }
 
+#[tauri::command]
+fn load_proxy_bypass(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    Ok(state
+        .proxy_bypass
+        .lock()
+        .map_err(|_| "读取绕过域名失败".to_string())?
+        .clone())
+}
+
+#[tauri::command]
+fn save_proxy_bypass(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    domains: Vec<String>,
+) -> Result<(), String> {
+    let data_dir = app_data_dir(&app)?;
+    let yaml = serde_yaml::to_string(&domains).map_err(|e| format!("序列化绕过域名失败: {e}"))?;
+    std::fs::write(data_dir.join("proxy_bypass.yaml"), yaml)
+        .map_err(|e| format!("保存绕过域名失败: {e}"))?;
+    *state
+        .proxy_bypass
+        .lock()
+        .map_err(|_| "更新绕过域名状态失败".to_string())? = domains.clone();
+
+    if state.proxy.is_enabled() {
+        let _ = state.proxy.apply_bypass_domains(&domains);
+    }
+
+    Ok(())
+}
+
 fn sub_content(state: &AppState) -> Option<String> {
     let guard: MutexGuard<'_, Option<String>> = state.subscription.lock().ok()?;
     (*guard).clone()
@@ -903,6 +953,16 @@ pub fn run() {
                     .ok()
                     .and_then(|s| serde_yaml::from_str(&s).ok())
                     .unwrap_or_default();
+            let bypass_path = data_dir.join("proxy_bypass.yaml");
+            let proxy_bypass: Vec<String> =
+                if bypass_path.exists() {
+                    std::fs::read_to_string(&bypass_path)
+                        .ok()
+                        .and_then(|s| serde_yaml::from_str(&s).ok())
+                        .unwrap_or_else(default_bypass_domains)
+                } else {
+                    default_bypass_domains()
+                };
             let autostart_enabled = autostart::is_enabled();
             app.manage(AppState {
                 subscription: Mutex::new(subscription),
@@ -912,6 +972,7 @@ pub fn run() {
                 subscriptions: Mutex::new(subscriptions),
                 selected_nodes: Mutex::new(selected_nodes),
                 custom_rules: Mutex::new(custom_rules),
+                proxy_bypass: Mutex::new(proxy_bypass),
                 autostart_enabled: Mutex::new(autostart_enabled),
                 data_dir: data_dir.clone(),
                 core,
@@ -987,7 +1048,13 @@ pub fn run() {
                             if currently {
                                 let _ = state.proxy.disable();
                             } else {
-                                let _ = state.proxy.enable();
+                                let bypass = state
+                                    .proxy_bypass
+                                    .lock()
+                                    .ok()
+                                    .map(|g| g.clone())
+                                    .unwrap_or_default();
+                                let _ = state.proxy.enable(&bypass);
                             }
                             update_tray_menu(&app, &state);
                             let _ = app.emit("system-proxy-changed", !currently);
@@ -1071,6 +1138,40 @@ pub fn run() {
 
             // Auto-start core on launch (non-TUN mode)
             let state = app.state::<AppState>();
+            // Regenerate runtime config so it always reflects the current port and settings
+            {
+                let subscription = state.subscription.lock().ok().and_then(|g| g.clone());
+                if let Some(ref sub) = subscription {
+                    let mode = state
+                        .mode
+                        .lock()
+                        .ok()
+                        .map(|m| *m)
+                        .unwrap_or(ProxyMode::Rule);
+                    let dns_override = state
+                        .dns_override
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.clone());
+                    let custom_rules = state
+                        .custom_rules
+                        .lock()
+                        .ok()
+                        .map(|g| g.clone())
+                        .unwrap_or_default();
+                    let config_path = data_dir.join("mihomo.yaml");
+                    if let Err(e) = write_runtime_config(
+                        &config_path,
+                        sub,
+                        mode.as_mihomo_mode(),
+                        false,
+                        dns_override.as_ref(),
+                        &custom_rules,
+                    ) {
+                        log::warn!("生成 Mihomo 运行配置失败: {e}");
+                    }
+                }
+            }
             if let Err(e) = state.core.start() {
                 log::warn!("自动启动 Mihomo 内核失败: {e}");
             }
@@ -1097,6 +1198,8 @@ pub fn run() {
             save_selected_nodes,
             load_custom_rules,
             save_custom_rules,
+            load_proxy_bypass,
+            save_proxy_bypass,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -1106,6 +1209,9 @@ pub fn run() {
                 if !state.is_quitting.load(Ordering::SeqCst) {
                     hide_main_window(app);
                     api.prevent_exit();
+                } else {
+                    let _ = state.proxy.disable();
+                    let _ = state.core.stop();
                 }
             }
         });

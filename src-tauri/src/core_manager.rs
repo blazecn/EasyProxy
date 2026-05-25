@@ -93,3 +93,14 @@ impl CoreManager {
         }
     }
 }
+
+impl Drop for CoreManager {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.child.lock() {
+            if let Some(mut child) = guard.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+}

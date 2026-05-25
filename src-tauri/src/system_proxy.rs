@@ -40,12 +40,16 @@ impl SystemProxy {
         is_platform_proxy_enabled()
     }
 
-    pub fn enable(&self) -> Result<(), String> {
-        enable_platform_proxy(&self.host, self.port)
+    pub fn enable(&self, bypass_domains: &[String]) -> Result<(), String> {
+        enable_platform_proxy(&self.host, self.port, bypass_domains)
     }
 
     pub fn disable(&self) -> Result<(), String> {
         disable_platform_proxy()
+    }
+
+    pub fn apply_bypass_domains(&self, bypass_domains: &[String]) -> Result<(), String> {
+        set_platform_bypass_domains(bypass_domains)
     }
 }
 
@@ -69,7 +73,7 @@ fn is_platform_proxy_enabled() -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn enable_platform_proxy(host: &str, port: u16) -> Result<(), String> {
+fn enable_platform_proxy(host: &str, port: u16, bypass_domains: &[String]) -> Result<(), String> {
     for service in network_services()? {
         run_networksetup(&["-setwebproxy", &service, host, &port.to_string()])?;
         run_networksetup(&["-setsecurewebproxy", &service, host, &port.to_string()])?;
@@ -77,8 +81,29 @@ fn enable_platform_proxy(host: &str, port: u16) -> Result<(), String> {
         run_networksetup(&["-setwebproxystate", &service, "on"])?;
         run_networksetup(&["-setsecurewebproxystate", &service, "on"])?;
         run_networksetup(&["-setsocksfirewallproxystate", &service, "on"])?;
+        apply_bypass_for_service(&service, bypass_domains)?;
     }
 
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn apply_bypass_for_service(service: &str, bypass_domains: &[String]) -> Result<(), String> {
+    let mut args: Vec<&str> = vec!["-setproxybypassdomains", service];
+    if bypass_domains.is_empty() {
+        args.push("");
+    } else {
+        let domains: Vec<&str> = bypass_domains.iter().map(|s| s.as_str()).collect();
+        args.extend(&domains);
+    }
+    run_networksetup(&args)
+}
+
+#[cfg(target_os = "macos")]
+fn set_platform_bypass_domains(bypass_domains: &[String]) -> Result<(), String> {
+    for service in network_services()? {
+        apply_bypass_for_service(&service, bypass_domains)?;
+    }
     Ok(())
 }
 
@@ -88,6 +113,7 @@ fn disable_platform_proxy() -> Result<(), String> {
         run_networksetup(&["-setwebproxystate", &service, "off"])?;
         run_networksetup(&["-setsecurewebproxystate", &service, "off"])?;
         run_networksetup(&["-setsocksfirewallproxystate", &service, "off"])?;
+        run_networksetup(&["-setproxybypassdomains", &service, ""])?;
     }
 
     Ok(())
@@ -138,7 +164,7 @@ fn run_networksetup(args: &[&str]) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
-fn enable_platform_proxy(host: &str, port: u16) -> Result<(), String> {
+fn enable_platform_proxy(host: &str, port: u16, bypass_domains: &[String]) -> Result<(), String> {
     let endpoint = format!("{host}:{port}");
     let status = Command::new("reg")
         .args([
@@ -157,12 +183,42 @@ fn enable_platform_proxy(host: &str, port: u16) -> Result<(), String> {
         return Err("写入 Windows 代理地址失败".to_string());
     }
 
-    set_windows_proxy_enabled(true)
+    set_windows_proxy_enabled(true)?;
+    set_windows_bypass_domains(bypass_domains)
+}
+
+#[cfg(target_os = "windows")]
+fn set_windows_bypass_domains(bypass_domains: &[String]) -> Result<(), String> {
+    let value = bypass_domains.join(";");
+    let status = Command::new("reg")
+        .args([
+            "add",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+            "/v",
+            "ProxyOverride",
+            "/d",
+            &value,
+            "/f",
+        ])
+        .status()
+        .map_err(|error| format!("写入 Windows 代理绕过列表失败: {error}"))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err("写入 Windows 代理绕过列表失败".to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn set_platform_bypass_domains(bypass_domains: &[String]) -> Result<(), String> {
+    set_windows_bypass_domains(bypass_domains)
 }
 
 #[cfg(target_os = "windows")]
 fn disable_platform_proxy() -> Result<(), String> {
-    set_windows_proxy_enabled(false)
+    set_windows_proxy_enabled(false)?;
+    set_windows_bypass_domains(&[])
 }
 
 #[cfg(target_os = "windows")]
@@ -196,11 +252,16 @@ fn is_platform_proxy_enabled() -> bool {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn enable_platform_proxy(_host: &str, _port: u16) -> Result<(), String> {
+fn enable_platform_proxy(_host: &str, _port: u16, _bypass_domains: &[String]) -> Result<(), String> {
     Err("当前平台暂不支持自动设置系统代理".to_string())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn disable_platform_proxy() -> Result<(), String> {
     Err("当前平台暂不支持自动关闭系统代理".to_string())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn set_platform_bypass_domains(_bypass_domains: &[String]) -> Result<(), String> {
+    Err("当前平台暂不支持代理绕过域名".to_string())
 }

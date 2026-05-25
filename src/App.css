@@ -1283,7 +1283,18 @@
   border: 1px solid rgba(0, 0, 0, 0.06);
   border-radius: 12px;
   padding: 14px 16px;
-  margin: 0;
+  margin: 0 0 16px 0;
+}
+
+.bypass-input-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.bypass-input-row .modal-input {
+  flex: 1;
+  margin-bottom: 0;
 }
 
 .dns-legend {

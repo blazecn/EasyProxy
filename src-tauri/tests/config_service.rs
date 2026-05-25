@@ -39,9 +39,9 @@ fn parse_subscription_returns_node_names() {
 
 #[test]
 fn build_mihomo_config_sets_ports_mode_and_controller() {
-    let config = build_mihomo_config(SAMPLE_SUBSCRIPTION, "rule", false, None).expect("config should build");
+    let config = build_mihomo_config(SAMPLE_SUBSCRIPTION, "rule", false, None, &[]).expect("config should build");
 
-    assert!(config.contains("mixed-port: 7890"));
+    assert!(config.contains("mixed-port: 7897"));
     assert!(config.contains("external-controller: 127.0.0.1:9090"));
     assert!(config.contains("mode: rule"));
     assert!(config.contains("HK 01"));
@@ -57,7 +57,7 @@ fn parse_subscription_accepts_base64_anytls_uri_lists() {
 
 #[test]
 fn build_mihomo_config_converts_anytls_uri_to_proxy_yaml() {
-    let config = build_mihomo_config(ANYTLS_URI_SUBSCRIPTION, "rule", false, None).expect("config should build");
+    let config = build_mihomo_config(ANYTLS_URI_SUBSCRIPTION, "rule", false, None, &[]).expect("config should build");
 
     assert!(config.contains("type: anytls"));
     assert!(config.contains("name: Edge 01"));
@@ -87,7 +87,7 @@ fn uri_subscription_preserves_provider_info_nodes() {
 
 #[test]
 fn generated_proxy_group_preserves_provider_info_nodes() {
-    let config = build_mihomo_config(ANYTLS_WITH_INFO_LINES, "rule", false, None).expect("config should build");
+    let config = build_mihomo_config(ANYTLS_WITH_INFO_LINES, "rule", false, None, &[]).expect("config should build");
 
     assert!(config.contains("剩余流量"));
     assert!(config.contains("套餐到期"));
@@ -97,7 +97,7 @@ fn generated_proxy_group_preserves_provider_info_nodes() {
 
 #[test]
 fn build_mihomo_config_with_tun_adds_tun_section() {
-    let config = build_mihomo_config(SAMPLE_SUBSCRIPTION, "rule", true, None).expect("config should build");
+    let config = build_mihomo_config(SAMPLE_SUBSCRIPTION, "rule", true, None, &[]).expect("config should build");
 
     assert!(config.contains("tun:"));
     assert!(config.contains("enable: true"));
@@ -110,7 +110,7 @@ fn build_mihomo_config_with_tun_adds_tun_section() {
 
 #[test]
 fn build_mihomo_config_without_tun_omits_tun_section() {
-    let config = build_mihomo_config(SAMPLE_SUBSCRIPTION, "rule", false, None).expect("config should build");
+    let config = build_mihomo_config(SAMPLE_SUBSCRIPTION, "rule", false, None, &[]).expect("config should build");
 
     assert!(!config.contains("tun:"));
     assert!(!config.contains("enable: true"));
@@ -121,7 +121,7 @@ fn build_mihomo_config_without_tun_omits_tun_section() {
 
 #[test]
 fn build_mihomo_config_tun_with_anytls_uri() {
-    let config = build_mihomo_config(ANYTLS_URI_SUBSCRIPTION, "global", true, None).expect("config should build");
+    let config = build_mihomo_config(ANYTLS_URI_SUBSCRIPTION, "global", true, None, &[]).expect("config should build");
 
     assert!(config.contains("type: anytls"));
     assert!(config.contains("tun:"));
@@ -138,7 +138,7 @@ fn dns_override_enabled_injects_dns_section() {
         config: dns_config,
     };
 
-    let result = build_mihomo_config(content, "rule", false, Some(&dns_override)).unwrap();
+    let result = build_mihomo_config(content, "rule", false, Some(&dns_override), &[]).unwrap();
     let doc: serde_yaml::Value = serde_yaml::from_str(&result).unwrap();
 
     let dns = doc.get("dns").unwrap();
@@ -155,7 +155,7 @@ fn dns_override_disabled_does_not_inject_dns_section() {
         config: dns_config,
     };
 
-    let result = build_mihomo_config(content, "rule", false, Some(&dns_override)).unwrap();
+    let result = build_mihomo_config(content, "rule", false, Some(&dns_override), &[]).unwrap();
     let doc: serde_yaml::Value = serde_yaml::from_str(&result).unwrap();
 
     assert!(doc.get("dns").is_none());
@@ -165,7 +165,7 @@ fn dns_override_disabled_does_not_inject_dns_section() {
 fn dns_override_none_does_not_inject_dns_section() {
     let content = "proxies:\n  - name: Test\n    type: ss\n    server: 1.2.3.4\n    port: 8388\n    password: pwd\n    cipher: aes-256-gcm\n";
 
-    let result = build_mihomo_config(content, "rule", false, None).unwrap();
+    let result = build_mihomo_config(content, "rule", false, None, &[]).unwrap();
     let doc: serde_yaml::Value = serde_yaml::from_str(&result).unwrap();
 
     assert!(doc.get("dns").is_none());
