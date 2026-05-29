@@ -100,7 +100,7 @@ pub fn merge_subscription(yaml_content: &str, uri_content: &str) -> Result<Strin
 
     let uri_nodes = match parse_uri_or_base64(uri_content) {
         Some(nodes) => nodes,
-        None => return Ok(yaml_content.to_string()),
+        None => return Err("URI 订阅内容解析失败".to_string()),
     };
 
     let (info_nodes, proxy_nodes): (Vec<_>, Vec<_>) = uri_nodes
@@ -405,13 +405,17 @@ fn build_groups_for_uri_nodes(nodes: &[UriProxyNode]) -> Vec<ProxyGroupSummary> 
 }
 
 fn parse_uri_subscription(content: &str) -> Result<Vec<UriProxyNode>, String> {
-    let nodes = content
+    let mut seen = std::collections::HashSet::new();
+    let nodes: Vec<UriProxyNode> = content
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .filter(|line| line.contains("://"))
         .map(parse_proxy_uri)
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|node| seen.insert(node.name.clone()))
+        .collect();
 
     if nodes.is_empty() {
         return Err("订阅中没有可用 URI 节点".to_string());
@@ -424,6 +428,12 @@ fn parse_proxy_uri(line: &str) -> Result<UriProxyNode, String> {
     let url = Url::parse(line).map_err(|error| format!("节点 URI 解析失败: {error}"))?;
     match url.scheme() {
         "anytls" => parse_anytls_uri(url),
+        "ss" => parse_ss_uri(url),
+        "vmess" => parse_vmess_uri(url),
+        "vless" => parse_vless_uri(url),
+        "trojan" => parse_trojan_uri(url),
+        "hysteria2" | "hy2" => parse_hysteria2_uri(url),
+        "tuic" => parse_tuic_uri(url),
         scheme => Err(format!("暂不支持 {scheme}:// 节点转换")),
     }
 }
@@ -484,6 +494,605 @@ fn parse_anytls_uri(url: Url) -> Result<UriProxyNode, String> {
     Ok(UriProxyNode { name, proxy })
 }
 
+fn parse_ss_uri(url: Url) -> Result<UriProxyNode, String> {
+    let server = url
+        .host_str()
+        .ok_or_else(|| "ss 节点缺少服务器地址".to_string())?
+        .to_string();
+    let port = url
+        .port()
+        .ok_or_else(|| "ss 节点缺少端口".to_string())?;
+    let name = decode_url_component(url.fragment().unwrap_or("Shadowsocks"));
+
+    // Decode userinfo: base64(method:password)
+    let userinfo = url.username();
+    let decoded_userinfo = general_purpose::STANDARD
+        .decode(userinfo)
+        .or_else(|_| general_purpose::URL_SAFE.decode(userinfo))
+        .map_err(|_| "ss 节点 userinfo 解码失败".to_string())?;
+    let userinfo_str =
+        String::from_utf8(decoded_userinfo).map_err(|_| "ss 节点 userinfo 非 UTF-8".to_string())?;
+    let (method, password) = userinfo_str
+        .split_once(':')
+        .ok_or_else(|| "ss 节点 userinfo 格式无效，应为 method:password".to_string())?;
+
+    let mut proxy = Mapping::new();
+    insert_scalar(&mut proxy, "name", Value::String(name.clone()));
+    insert_scalar(&mut proxy, "type", Value::String("ss".to_string()));
+    insert_scalar(&mut proxy, "server", Value::String(server));
+    insert_scalar(&mut proxy, "port", Value::Number(port.into()));
+    insert_scalar(
+        &mut proxy,
+        "cipher",
+        Value::String(method.to_string()),
+    );
+    insert_scalar(
+        &mut proxy,
+        "password",
+        Value::String(decode_url_component(password)),
+    );
+
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "obfs" => {
+                insert_scalar(&mut proxy, "plugin", Value::String("obfs".to_string()));
+                insert_scalar(&mut proxy, "plugin-opts", Value::String(value.to_string()));
+            }
+            "obfs-opts" => {
+                insert_scalar(
+                    &mut proxy,
+                    "plugin-opts",
+                    Value::String(value.to_string()),
+                );
+            }
+            "v2ray-plugin" | "v2ray-opts" => {
+                insert_scalar(
+                    &mut proxy,
+                    "plugin",
+                    Value::String("v2ray-plugin".to_string()),
+                );
+                insert_scalar(
+                    &mut proxy,
+                    "plugin-opts",
+                    Value::String(value.to_string()),
+                );
+            }
+            "tls" | "ssl" => {
+                if matches!(value.as_ref(), "1" | "true" | "TRUE") {
+                    insert_scalar(&mut proxy, "tls", Value::Bool(true));
+                }
+            }
+            "sni" => {
+                insert_scalar(&mut proxy, "sni", Value::String(value.to_string()));
+            }
+            "skip-cert-verify" => {
+                insert_scalar(
+                    &mut proxy,
+                    "skip-cert-verify",
+                    Value::Bool(matches!(value.as_ref(), "1" | "true" | "TRUE")),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    Ok(UriProxyNode { name, proxy })
+}
+
+fn parse_vmess_uri(url: Url) -> Result<UriProxyNode, String> {
+    let encoded = url
+        .host_str()
+        .ok_or_else(|| "vmess 节点缺少编码数据".to_string())?;
+
+    // vmess://base64(json) — the host part after scheme is the Base64-encoded JSON
+    // Reconstruct the full encoded string from host + path (Url::parse may split on /)
+    let full_encoded = format!(
+        "{}{}",
+        encoded,
+        url.path().trim_start_matches('/')
+    );
+    let decoded = general_purpose::STANDARD
+        .decode(&full_encoded)
+        .or_else(|_| general_purpose::URL_SAFE.decode(&full_encoded))
+        .map_err(|_| "vmess 节点 Base64 解码失败".to_string())?;
+    let json_str =
+        String::from_utf8(decoded).map_err(|_| "vmess 节点 JSON 非 UTF-8".to_string())?;
+    let json: serde_json::Value = serde_json::from_str(&json_str)
+        .map_err(|error| format!("vmess 节点 JSON 解析失败: {error}"))?;
+
+    let server = json
+        .get("add")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "vmess 节点缺少服务器地址 (add)".to_string())?
+        .to_string();
+    let port: u32 = json
+        .get("port")
+        .and_then(|v| v.as_str().or_else(|| v.as_u64().map(|_| "")))
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| "vmess 节点缺少有效端口 (port)".to_string())?;
+    let uuid = json
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "vmess 节点缺少 UUID (id)".to_string())?
+        .to_string();
+    let alter_id = json
+        .get("aid")
+        .and_then(|v| v.as_str().and_then(|s| s.parse::<u32>().ok()).or_else(|| v.as_u64().map(|n| n as u32)))
+        .unwrap_or(0);
+    let name = json
+        .get("ps")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("VMess")
+        .to_string();
+
+    let mut proxy = Mapping::new();
+    insert_scalar(&mut proxy, "name", Value::String(name.clone()));
+    insert_scalar(&mut proxy, "type", Value::String("vmess".to_string()));
+    insert_scalar(&mut proxy, "server", Value::String(server));
+    insert_scalar(&mut proxy, "port", Value::Number(port.into()));
+    insert_scalar(&mut proxy, "uuid", Value::String(uuid));
+    insert_scalar(&mut proxy, "alterId", Value::Number(alter_id.into()));
+    insert_scalar(
+        &mut proxy,
+        "cipher",
+        Value::String(
+            json.get("scy")
+                .and_then(|v| v.as_str())
+                .unwrap_or("auto")
+                .to_string(),
+        ),
+    );
+
+    // Transport type
+    let net = json
+        .get("net")
+        .and_then(|v| v.as_str())
+        .unwrap_or("tcp");
+    if net != "tcp" {
+        insert_scalar(&mut proxy, "network", Value::String(net.to_string()));
+    }
+
+    // TLS
+    if let Some(tls) = json.get("tls").and_then(|v| v.as_str()) {
+        if tls == "tls" {
+            insert_scalar(&mut proxy, "tls", Value::Bool(true));
+        }
+    }
+
+    // Transport-specific options
+    match net {
+        "ws" => {
+            let mut ws_opts = Mapping::new();
+            if let Some(path) = json.get("path").and_then(|v| v.as_str()) {
+                insert_scalar(&mut ws_opts, "path", Value::String(path.to_string()));
+            }
+            if let Some(host) = json.get("host").and_then(|v| v.as_str()) {
+                insert_scalar(&mut ws_opts, "headers", {
+                    let mut headers = Mapping::new();
+                    insert_scalar(&mut headers, "Host", Value::String(host.to_string()));
+                    Value::Mapping(headers)
+                });
+            }
+            if !ws_opts.is_empty() {
+                root_proxy_insert(&mut proxy, "ws-opts", Value::Mapping(ws_opts));
+            }
+        }
+        "grpc" => {
+            let mut grpc_opts = Mapping::new();
+            if let Some(service_name) = json.get("path").and_then(|v| v.as_str()) {
+                insert_scalar(
+                    &mut grpc_opts,
+                    "grpc-service-name",
+                    Value::String(service_name.to_string()),
+                );
+            }
+            if !grpc_opts.is_empty() {
+                root_proxy_insert(&mut proxy, "grpc-opts", Value::Mapping(grpc_opts));
+            }
+        }
+        "h2" => {
+            let mut h2_opts = Mapping::new();
+            if let Some(path) = json.get("path").and_then(|v| v.as_str()) {
+                insert_scalar(&mut h2_opts, "path", Value::String(path.to_string()));
+            }
+            if let Some(host) = json.get("host").and_then(|v| v.as_str()) {
+                insert_scalar(
+                    &mut h2_opts,
+                    "host",
+                    Value::Sequence(vec![Value::String(host.to_string())]),
+                );
+            }
+            if !h2_opts.is_empty() {
+                root_proxy_insert(&mut proxy, "h2-opts", Value::Mapping(h2_opts));
+            }
+        }
+        _ => {}
+    }
+
+    // TLS options
+    if proxy.get("tls").and_then(|v| v.as_bool()) == Some(true) {
+        if let Some(sni) = json.get("sni").and_then(|v| v.as_str()) {
+            insert_scalar(&mut proxy, "sni", Value::String(sni.to_string()));
+        }
+        if let Some(fp) = json.get("fp").and_then(|v| v.as_str()) {
+            insert_scalar(&mut proxy, "client-fingerprint", Value::String(fp.to_string()));
+        }
+        if let Some(alpn) = json.get("alpn").and_then(|v| v.as_str()) {
+            insert_scalar(
+                &mut proxy,
+                "alpn",
+                Value::Sequence(
+                    alpn.split(',')
+                        .map(|s| Value::String(s.trim().to_string()))
+                        .collect(),
+                ),
+            );
+        }
+    }
+
+    Ok(UriProxyNode { name, proxy })
+}
+
+fn parse_vless_uri(url: Url) -> Result<UriProxyNode, String> {
+    let uuid = decode_url_component(url.username());
+    let server = url
+        .host_str()
+        .ok_or_else(|| "vless 节点缺少服务器地址".to_string())?
+        .to_string();
+    let port = url
+        .port()
+        .ok_or_else(|| "vless 节点缺少端口".to_string())?;
+    let name = decode_url_component(url.fragment().unwrap_or("VLESS"));
+
+    let mut proxy = Mapping::new();
+    insert_scalar(&mut proxy, "name", Value::String(name.clone()));
+    insert_scalar(&mut proxy, "type", Value::String("vless".to_string()));
+    insert_scalar(&mut proxy, "server", Value::String(server));
+    insert_scalar(&mut proxy, "port", Value::Number(port.into()));
+    insert_scalar(&mut proxy, "uuid", Value::String(uuid));
+    insert_scalar(
+        &mut proxy,
+        "udp",
+        Value::Bool(true),
+    );
+
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "encryption" => {} // usually "none", skip
+            "security" => {
+                if value != "none" {
+                    insert_scalar(&mut proxy, "tls", Value::Bool(true));
+                    if value == "reality" {
+                        insert_scalar(
+                            &mut proxy,
+                            "reality-opts",
+                            Value::Mapping(Mapping::new()),
+                        );
+                    }
+                }
+            }
+            "sni" => {
+                insert_scalar(&mut proxy, "sni", Value::String(value.to_string()));
+            }
+            "fp" => {
+                insert_scalar(
+                    &mut proxy,
+                    "client-fingerprint",
+                    Value::String(value.to_string()),
+                );
+            }
+            "pbk" => {
+                insert_scalar(&mut proxy, "public-key", Value::String(value.to_string()));
+            }
+            "sid" => {
+                insert_scalar(&mut proxy, "short-id", Value::String(value.to_string()));
+            }
+            "flow" => {
+                insert_scalar(&mut proxy, "flow", Value::String(value.to_string()));
+            }
+            "type" | "net" => {
+                if value != "tcp" {
+                    insert_scalar(&mut proxy, "network", Value::String(value.to_string()));
+                }
+            }
+            "host" => {
+                insert_scalar(
+                    &mut proxy,
+                    "ws-opts",
+                    {
+                        let mut ws_opts = Mapping::new();
+                        insert_scalar(
+                            &mut ws_opts,
+                            "headers",
+                            {
+                                let mut headers = Mapping::new();
+                                insert_scalar(&mut headers, "Host", Value::String(value.to_string()));
+                                Value::Mapping(headers)
+                            },
+                        );
+                        Value::Mapping(ws_opts)
+                    },
+                );
+            }
+            "path" => {
+                let network = proxy
+                    .get("network")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("tcp");
+                let opts_key = match network {
+                    "ws" => "ws-opts",
+                    "h2" => "h2-opts",
+                    "grpc" => "grpc-opts",
+                    _ => "ws-opts",
+                };
+                let existing = proxy
+                    .get(opts_key)
+                    .and_then(|v| v.as_mapping())
+                    .cloned()
+                    .unwrap_or_default();
+                let mut opts = existing;
+                if network == "grpc" {
+                    insert_scalar(
+                        &mut opts,
+                        "grpc-service-name",
+                        Value::String(value.to_string()),
+                    );
+                } else {
+                    insert_scalar(&mut opts, "path", Value::String(value.to_string()));
+                }
+                root_proxy_insert(&mut proxy, opts_key, Value::Mapping(opts));
+            }
+            "alpn" => {
+                insert_scalar(
+                    &mut proxy,
+                    "alpn",
+                    Value::Sequence(
+                        value
+                            .split(',')
+                            .map(|s| Value::String(s.trim().to_string()))
+                            .collect(),
+                    ),
+                );
+            }
+            "skip-cert-verify" => {
+                insert_scalar(
+                    &mut proxy,
+                    "skip-cert-verify",
+                    Value::Bool(matches!(value.as_ref(), "1" | "true" | "TRUE")),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    Ok(UriProxyNode { name, proxy })
+}
+
+fn parse_trojan_uri(url: Url) -> Result<UriProxyNode, String> {
+    let password = decode_url_component(url.username());
+    let server = url
+        .host_str()
+        .ok_or_else(|| "trojan 节点缺少服务器地址".to_string())?
+        .to_string();
+    let port = url
+        .port()
+        .ok_or_else(|| "trojan 节点缺少端口".to_string())?;
+    let name = decode_url_component(url.fragment().unwrap_or("Trojan"));
+
+    let mut proxy = Mapping::new();
+    insert_scalar(&mut proxy, "name", Value::String(name.clone()));
+    insert_scalar(&mut proxy, "type", Value::String("trojan".to_string()));
+    insert_scalar(&mut proxy, "server", Value::String(server));
+    insert_scalar(&mut proxy, "port", Value::Number(port.into()));
+    insert_scalar(&mut proxy, "password", Value::String(password));
+    insert_scalar(&mut proxy, "udp", Value::Bool(true));
+
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "security" | "type" => {
+                if value == "tls" {
+                    insert_scalar(&mut proxy, "tls", Value::Bool(true));
+                } else if value != "none" {
+                    insert_scalar(&mut proxy, "network", Value::String(value.to_string()));
+                }
+            }
+            "sni" | "peer" => {
+                insert_scalar(&mut proxy, "sni", Value::String(value.to_string()));
+            }
+            "fp" => {
+                insert_scalar(
+                    &mut proxy,
+                    "client-fingerprint",
+                    Value::String(value.to_string()),
+                );
+            }
+            "alpn" => {
+                insert_scalar(
+                    &mut proxy,
+                    "alpn",
+                    Value::Sequence(
+                        value
+                            .split(',')
+                            .map(|s| Value::String(s.trim().to_string()))
+                            .collect(),
+                    ),
+                );
+            }
+            "host" => {
+                insert_scalar(&mut proxy, "sni", Value::String(value.to_string()));
+            }
+            "path" => {
+                let network = proxy
+                    .get("network")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("tcp");
+                let opts_key = match network {
+                    "ws" => "ws-opts",
+                    "h2" => "h2-opts",
+                    "grpc" => "grpc-opts",
+                    _ => "ws-opts",
+                };
+                let existing = proxy
+                    .get(opts_key)
+                    .and_then(|v| v.as_mapping())
+                    .cloned()
+                    .unwrap_or_default();
+                let mut opts = existing;
+                if network == "grpc" {
+                    insert_scalar(
+                        &mut opts,
+                        "grpc-service-name",
+                        Value::String(value.to_string()),
+                    );
+                } else {
+                    insert_scalar(&mut opts, "path", Value::String(value.to_string()));
+                }
+                root_proxy_insert(&mut proxy, opts_key, Value::Mapping(opts));
+            }
+            "skip-cert-verify" => {
+                insert_scalar(
+                    &mut proxy,
+                    "skip-cert-verify",
+                    Value::Bool(matches!(value.as_ref(), "1" | "true" | "TRUE")),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    Ok(UriProxyNode { name, proxy })
+}
+
+fn parse_hysteria2_uri(url: Url) -> Result<UriProxyNode, String> {
+    let password = decode_url_component(url.username());
+    let server = url
+        .host_str()
+        .ok_or_else(|| "hysteria2 节点缺少服务器地址".to_string())?
+        .to_string();
+    let port = url
+        .port()
+        .ok_or_else(|| "hysteria2 节点缺少端口".to_string())?;
+    let name = decode_url_component(url.fragment().unwrap_or("Hysteria2"));
+
+    let mut proxy = Mapping::new();
+    insert_scalar(&mut proxy, "name", Value::String(name.clone()));
+    insert_scalar(
+        &mut proxy,
+        "type",
+        Value::String("hysteria2".to_string()),
+    );
+    insert_scalar(&mut proxy, "server", Value::String(server));
+    insert_scalar(&mut proxy, "port", Value::Number(port.into()));
+    if !password.is_empty() {
+        insert_scalar(&mut proxy, "password", Value::String(password));
+    }
+
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "sni" => {
+                insert_scalar(&mut proxy, "sni", Value::String(value.to_string()));
+            }
+            "insecure" => {
+                insert_scalar(
+                    &mut proxy,
+                    "skip-cert-verify",
+                    Value::Bool(matches!(value.as_ref(), "1" | "true" | "TRUE")),
+                );
+            }
+            "obfs" => {
+                insert_scalar(&mut proxy, "obfs", Value::String(value.to_string()));
+            }
+            "obfs-password" => {
+                insert_scalar(
+                    &mut proxy,
+                    "obfs-password",
+                    Value::String(value.to_string()),
+                );
+            }
+            "pinSHA256" => {
+                insert_scalar(
+                    &mut proxy,
+                    "pinSHA256",
+                    Value::String(value.to_string()),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    Ok(UriProxyNode { name, proxy })
+}
+
+fn parse_tuic_uri(url: Url) -> Result<UriProxyNode, String> {
+    let uuid = decode_url_component(url.username());
+    let password = decode_url_component(url.password().unwrap_or(""));
+    let server = url
+        .host_str()
+        .ok_or_else(|| "tuic 节点缺少服务器地址".to_string())?
+        .to_string();
+    let port = url
+        .port()
+        .ok_or_else(|| "tuic 节点缺少端口".to_string())?;
+    let name = decode_url_component(url.fragment().unwrap_or("TUIC"));
+
+    let mut proxy = Mapping::new();
+    insert_scalar(&mut proxy, "name", Value::String(name.clone()));
+    insert_scalar(&mut proxy, "type", Value::String("tuic".to_string()));
+    insert_scalar(&mut proxy, "server", Value::String(server));
+    insert_scalar(&mut proxy, "port", Value::Number(port.into()));
+    insert_scalar(&mut proxy, "uuid", Value::String(uuid));
+    insert_scalar(&mut proxy, "password", Value::String(password));
+
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "congestion_control" | "congestion-control" => {
+                insert_scalar(
+                    &mut proxy,
+                    "congestion-control",
+                    Value::String(value.to_string()),
+                );
+            }
+            "udp_relay_mode" | "udp-relay-mode" => {
+                insert_scalar(
+                    &mut proxy,
+                    "udp-relay-mode",
+                    Value::String(value.to_string()),
+                );
+            }
+            "allow_insecure" | "allow-insecure" => {
+                insert_scalar(
+                    &mut proxy,
+                    "skip-cert-verify",
+                    Value::Bool(matches!(value.as_ref(), "1" | "true" | "TRUE")),
+                );
+            }
+            "sni" => {
+                insert_scalar(&mut proxy, "sni", Value::String(value.to_string()));
+            }
+            "alpn" => {
+                insert_scalar(
+                    &mut proxy,
+                    "alpn",
+                    Value::Sequence(
+                        value
+                            .split(',')
+                            .map(|s| Value::String(s.trim().to_string()))
+                            .collect(),
+                    ),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    Ok(UriProxyNode { name, proxy })
+}
+
+fn root_proxy_insert(proxy: &mut Mapping, key: &str, value: Value) {
+    proxy.insert(Value::String(key.to_string()), value);
+}
+
 fn strip_region_flags(name: &str) -> String {
     name.chars()
         .skip_while(|c| ('\u{1F1E6}'..='\u{1F1FF}').contains(c))
@@ -493,7 +1102,21 @@ fn strip_region_flags(name: &str) -> String {
 }
 
 fn is_info_node_name(name: &str) -> bool {
-    name.contains("流量") || name.contains("重置") || name.contains("到期") || name.contains("官网")
+    name.contains("流量")
+        || name.contains("重置")
+        || name.contains("到期")
+        || name.contains("官网")
+        || name.contains("套餐")
+        || name.contains("剩余")
+        || name.contains("用量")
+        || name.contains("公告")
+        || name.contains("通知")
+        || name.contains("续费")
+        || name.contains("购买")
+        || name.contains("过期")
+        || name.contains("更新")
+        || name.contains("升级")
+        || name.contains("教程")
 }
 
 fn extract_region(name: &str) -> String {
